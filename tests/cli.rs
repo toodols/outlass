@@ -1,0 +1,1264 @@
+//! Integration tests proving that every claim made in `outlass --help` (and the
+//! `properties`/`functions` subcommand help) is actually true of the compiled binary.
+//!
+//! Every test shells out to the real binary via `CARGO_BIN_EXE_outlass`. No src/ code is
+//! touched or imported directly.
+
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+// ---------- helpers ----------
+
+fn bin() -> &'static str {
+    env!("CARGO_BIN_EXE_outlass")
+}
+
+/// Runs the binary with the given args and optional stdin, returning (exit_code, stdout, stderr).
+fn run(args: &[&str], stdin: Option<&str>) -> (i32, String, String) {
+    let mut cmd = Command::new(bin());
+    cmd.args(args);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    if stdin.is_some() {
+        cmd.stdin(Stdio::piped());
+    } else {
+        cmd.stdin(Stdio::null());
+    }
+    let mut child = cmd.spawn().expect("failed to spawn outlass binary");
+    if let Some(input) = stdin {
+        child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+    }
+    let output = child.wait_with_output().expect("failed to wait on outlass");
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Creates a fresh, empty temp directory under std::env::temp_dir() unique to this test process
+/// and call site. The caller is responsible for removing it (via `TempDir`'s Drop, see below).
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new(tag: &str) -> Self {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("outlass-cli-test-{pid}-{tag}-{n}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        TempDir(dir)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+
+    fn write(&self, name: &str, content: &str) -> PathBuf {
+        let p = self.0.join(name);
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&p, content).unwrap();
+        p
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Compiles `scss` (written to a temp .scss file) with `extra_args`, printing to stdout.
+/// Panics with full diagnostics if the compile fails. Returns (stdout, stderr).
+fn compile(scss: &str, extra_args: &[&str]) -> (String, String) {
+    let dir = TempDir::new("compile");
+    let input = dir.write("in.scss", scss);
+    let mut args: Vec<String> = vec![input.to_str().unwrap().to_string(), "-o".into(), "-".into()];
+    args.extend(extra_args.iter().map(|s| s.to_string()));
+    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let (code, stdout, stderr) = run(&arg_refs, None);
+    assert_eq!(code, 0, "compile failed.\nargs: {:?}\nstdout: {stdout}\nstderr: {stderr}", arg_refs);
+    (stdout, stderr)
+}
+
+fn fixture(name: &str) -> String {
+    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    p.push("tests");
+    p.push("fixtures");
+    p.push(name);
+    p.to_str().unwrap().to_string()
+}
+
+// ---------- 1. lass compatibility ----------
+
+#[test]
+fn lass_file_compiles_and_matches_expected_shape() {
+    let path = fixture("example.lass");
+    let (code, stdout, stderr) = run(&[&path, "-o", "-", "--cascade", "none"], None);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains(r#"rule(sheet, "TextButton, TextLabel", 10, {"#), "stdout:\n{stdout}");
+    assert!(stdout.contains("SetPropertyTransitions"), "stdout:\n{stdout}");
+    assert!(stdout.contains(r#"sheet:SetAttribute("Red", Color3.fromRGB(1, 0, 0))"#), "stdout:\n{stdout}");
+    assert!(stdout.contains(r#""ImageLabel:Hover", 1"#), "stdout:\n{stdout}");
+    assert!(stdout.trim_end().ends_with("return sheet"), "stdout:\n{stdout}");
+}
+
+// ---------- 2. default output paths ----------
+
+#[test]
+fn default_output_writes_luau_next_to_input() {
+    let dir = TempDir::new("default-out");
+    let input = dir.write("x.scss", ".a { Color: 1 }\n");
+    let (code, _stdout, stderr) = run(&[input.to_str().unwrap()], None);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(dir.path().join("x.luau").is_file(), "expected x.luau next to x.scss");
+}
+
+#[test]
+fn emit_css_writes_css_extension() {
+    let dir = TempDir::new("emit-css");
+    let input = dir.write("x.scss", ".a { Color: 1 }\n");
+    let (code, _stdout, stderr) = run(&[input.to_str().unwrap(), "--emit", "css"], None);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(dir.path().join("x.css").is_file(), "expected x.css next to x.scss");
+}
+
+#[test]
+fn out_dir_creates_directory_and_writes_there() {
+    let dir = TempDir::new("out-dir");
+    let input = dir.write("x.scss", ".a { Color: 1 }\n");
+    let outdir = dir.path().join("outdir");
+    assert!(!outdir.exists());
+    let (code, _stdout, stderr) = run(&[input.to_str().unwrap(), "-d", outdir.to_str().unwrap()], None);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(outdir.join("x.luau").is_file(), "expected outdir/x.luau to be created");
+}
+
+// ---------- 3. stdout / stdin ----------
+
+#[test]
+fn dash_output_prints_to_stdout_without_writing_a_file() {
+    let dir = TempDir::new("dash-out");
+    let input = dir.write("x.scss", ".a { Color: 1 }\n");
+    let (code, stdout, stderr) = run(&[input.to_str().unwrap(), "-o", "-"], None);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("return sheet"));
+    assert!(!dir.path().join("x.luau").is_file(), "no file should have been written when -o - is used");
+}
+
+#[test]
+fn dash_input_reads_scss_from_stdin() {
+    let (code, stdout, stderr) = run(&["-", "-o", "-"], Some(".a { BackgroundTransparency: 1 }"));
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("BackgroundTransparency = 1"), "stdout:\n{stdout}");
+}
+
+// ---------- 4. --output / --merge ----------
+
+#[test]
+fn output_with_two_inputs_is_a_usage_error_mentioning_merge() {
+    let dir = TempDir::new("output-two-inputs");
+    let a = dir.write("a.scss", ".a { Color: 1 }\n");
+    let b = dir.write("b.scss", ".b { Color: 2 }\n");
+    let out = dir.path().join("out.luau");
+    let (code, _stdout, stderr) = run(&["-o", out.to_str().unwrap(), a.to_str().unwrap(), b.to_str().unwrap()], None);
+    assert_eq!(code, 2, "stderr: {stderr}");
+    assert!(stderr.contains("--merge"), "stderr should mention --merge:\n{stderr}");
+}
+
+#[test]
+fn merge_without_output_is_a_usage_error() {
+    let dir = TempDir::new("merge-no-output");
+    let a = dir.write("a.scss", ".a { Color: 1 }\n");
+    let b = dir.write("b.scss", ".b { Color: 2 }\n");
+    let (code, _stdout, stderr) = run(&["--merge", a.to_str().unwrap(), b.to_str().unwrap()], None);
+    assert_eq!(code, 2, "stderr: {stderr}");
+}
+
+#[test]
+fn merge_combines_inputs_into_one_sheet_named_after_output() {
+    let dir = TempDir::new("merge-ok");
+    let a = dir.write("a.scss", ".a { Color: 1 }\n");
+    let b = dir.write("b.scss", ".b { Color: 2 }\n");
+    let out = dir.path().join("all.luau");
+    let (code, _stdout, stderr) =
+        run(&["--merge", "-o", out.to_str().unwrap(), a.to_str().unwrap(), b.to_str().unwrap()], None);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let content = std::fs::read_to_string(&out).unwrap();
+    assert!(content.contains(r#"sheet.Name = "all""#), "content:\n{content}");
+    assert!(content.contains(r#"rule(sheet, ".a", "#), "content:\n{content}");
+    assert!(content.contains(r#"rule(sheet, ".b", "#), "content:\n{content}");
+    // Only one `local sheet = Instance.new` — a single combined StyleSheet.
+    assert_eq!(content.matches("Instance.new(\"StyleSheet\")").count(), 1, "content:\n{content}");
+}
+
+// ---------- 5. globs ----------
+
+#[test]
+fn glob_compiles_matches_and_skips_partials() {
+    let dir = TempDir::new("glob");
+    dir.write("a.scss", ".a { Color: 1 }\n");
+    dir.write("_p.scss", ".p { Color: 1 }\n");
+    let pattern = dir.path().join("*.scss");
+    let (code, _stdout, stderr) = run(&[pattern.to_str().unwrap()], None);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(dir.path().join("a.luau").is_file(), "a.luau should have been written");
+    assert!(!dir.path().join("_p.luau").is_file(), "_p.luau (a partial) should be skipped");
+}
+
+#[test]
+fn glob_matching_nothing_is_an_error() {
+    let dir = TempDir::new("glob-empty");
+    let pattern = dir.path().join("*.nonexistent");
+    let (code, _stdout, stderr) = run(&[pattern.to_str().unwrap()], None);
+    assert_eq!(code, 2, "stderr: {stderr}");
+}
+
+// ---------- 6. --approx ----------
+
+#[test]
+fn approx_before_input_translates_opacity() {
+    let dir = TempDir::new("approx-before");
+    let input = dir.write("x.scss", ".a { opacity: 0.25; }\n");
+    let (code, stdout, stderr) = run(&["--approx", input.to_str().unwrap(), "-o", "-"], None);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("TextTransparency = 0.75"), "stdout:\n{stdout}");
+}
+
+#[test]
+fn approx_group_filter_translates_only_that_group() {
+    let (stdout, stderr) = compile(".a { opacity: 0.25; border-radius: 4px; }", &["--approx=opacity"]);
+    assert!(stdout.contains("TextTransparency = 0.75"), "stdout:\n{stdout}");
+    assert!(!stdout.contains("UICorner"), "border-radius should not have been translated:\n{stdout}");
+    assert!(stderr.contains("--approx=box"), "stderr should point at the box group:\n{stderr}");
+}
+
+#[test]
+fn no_approx_warns_and_drops_css_property() {
+    let (stdout, stderr) = compile(".a { opacity: 0.25; }", &[]);
+    assert!(stderr.contains("--approx"), "stderr:\n{stderr}");
+    assert!(!stdout.contains("Transparency"), "no Roblox property should have been produced:\n{stdout}");
+}
+
+// ---------- 7. -D / --define ----------
+
+#[test]
+fn define_overrides_default_declaration() {
+    let (stdout, _stderr) =
+        compile("$accent: red !default;\n.a { BackgroundColor3: $accent }", &["-D", "accent=#00ff00"]);
+    assert!(stdout.contains("BackgroundColor3 = Color3.fromRGB(0, 255, 0)"), "stdout:\n{stdout}");
+}
+
+#[test]
+fn non_default_declaration_still_wins_over_define() {
+    let (stdout, _stderr) = compile("$accent: blue;\n.a { BackgroundColor3: $accent }", &["-D", "accent=#00ff00"]);
+    assert!(stdout.contains("BackgroundColor3 = Color3.fromRGB(0, 0, 255)"), "stdout:\n{stdout}");
+}
+
+// ---------- 8. -I / --load-path ----------
+
+#[test]
+fn load_path_resolves_use_target() {
+    let dir = TempDir::new("load-path");
+    let libs = dir.path().join("libs");
+    std::fs::create_dir_all(&libs).unwrap();
+    std::fs::write(libs.join("_lib.scss"), "$foo: 1;\n.lib { Color: $foo }\n").unwrap();
+    let input = dir.write("use.scss", "@use \"lib\";\n.a { Color: lib.$foo }\n");
+    let (code, stdout, stderr) = run(&["-I", libs.to_str().unwrap(), input.to_str().unwrap(), "-o", "-"], None);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains(r#"rule(sheet, ".lib", "#), "stdout:\n{stdout}");
+    assert!(stdout.contains(r#"rule(sheet, ".a", "#), "stdout:\n{stdout}");
+}
+
+// ---------- 9. --syntax ----------
+
+#[test]
+fn syntax_sass_compiles_indented_stdin() {
+    let (code, stdout, stderr) = run(&["--syntax", "sass", "-", "-o", "-"], Some(".a\n  BackgroundTransparency: 1\n"));
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("BackgroundTransparency = 1"), "stdout:\n{stdout}");
+}
+
+#[test]
+fn dot_sass_extension_is_autodetected() {
+    let dir = TempDir::new("sass-auto");
+    let input = dir.write("auto.sass", ".a\n  BackgroundTransparency: 1\n");
+    let (code, stdout, stderr) = run(&[input.to_str().unwrap(), "-o", "-"], None);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("BackgroundTransparency = 1"), "stdout:\n{stdout}");
+}
+
+// ---------- 10. --default-priority / --cascade / @priority ----------
+
+#[test]
+fn default_priority_is_emitted_as_is_without_the_css_cascade() {
+    let (stdout, _stderr) = compile(
+        ".a { Color: 1 }\n.b { Color: 2 }\n@priority 9;\n.c { Color: 3 }\n",
+        &["--cascade", "none", "--default-priority", "5"],
+    );
+    assert!(stdout.contains(r#"rule(sheet, ".a", 5, {"#), "stdout:\n{stdout}");
+    assert!(stdout.contains(r#"rule(sheet, ".b", 5, {"#), "stdout:\n{stdout}");
+    assert!(stdout.contains(r#"rule(sheet, ".c", 9, {"#), "stdout:\n{stdout}");
+}
+
+/// The priority each selector got, in output order.
+fn priorities(stdout: &str) -> Vec<(String, String)> {
+    stdout
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("rule(sheet, \"").or_else(|| l.split("= rule(sheet, \"").nth(1)))
+        .map(|rest| {
+            let (sel, rest) = rest.split_once("\", ").unwrap();
+            (sel.to_string(), rest.split(',').next().unwrap().to_string())
+        })
+        .collect()
+}
+
+fn priority_of(stdout: &str, selector: &str) -> f64 {
+    priorities(stdout)
+        .into_iter()
+        .find(|(s, _)| s == selector)
+        .unwrap_or_else(|| panic!("no rule for {selector}:\n{stdout}"))
+        .1
+        .parse()
+        .unwrap()
+}
+
+#[test]
+fn css_cascade_orders_by_specificity_then_source_order() {
+    let (out, _) = compile("#b { Color: 1 }\n.a { Color: 2 }\nFrame { Color: 3 }\n.c { Color: 4 }\n", &[]);
+    assert!(priority_of(&out, "Frame") < priority_of(&out, ".a"), "{out}");
+    assert!(priority_of(&out, ".a") < priority_of(&out, ".c"), "later wins at equal specificity:\n{out}");
+    assert!(priority_of(&out, ".c") < priority_of(&out, "#b"), "{out}");
+}
+
+#[test]
+fn priority_tiers_beat_specificity_and_default_priority_sets_the_default_tier() {
+    let (out, _) = compile("@priority 1;\n.a { Color: 1 }\n#b { Color: 2 }\n", &[]);
+    assert!(priority_of(&out, ".a") > priority_of(&out, "#b"), "{out}");
+    let (out, _) = compile("@priority 1;\n.a { Color: 1 }\n#b { Color: 2 }\n", &["--default-priority", "5"]);
+    assert!(priority_of(&out, ".a") < priority_of(&out, "#b"), "{out}");
+}
+
+#[test]
+fn important_declarations_beat_everything_normal() {
+    let (out, stderr) = compile("@priority 50;\n#x.y { Color: 3 }\n.a { Color: 1 !important; Other: 2 }\n", &[]);
+    assert!(!stderr.contains("important"), "{stderr}");
+    let rules = priorities(&out);
+    let a: Vec<_> = rules.iter().filter(|(s, _)| s == ".a").collect();
+    assert_eq!(a.len(), 2, "normal and !important parts:\n{out}");
+    let top = rules.iter().map(|(_, p)| p.parse::<f64>().unwrap()).fold(f64::MIN, f64::max);
+    assert_eq!(a[1].1.parse::<f64>().unwrap(), top, "{out}");
+    let important_part = &out[out.rfind("\".a\"").unwrap()..];
+    assert!(important_part[..important_part.find('}').unwrap()].contains("Color = 1"), "{out}");
+    assert!(!important_part[..important_part.find('}').unwrap()].contains("Other"), "{out}");
+}
+
+#[test]
+fn important_is_ignored_with_a_warning_without_the_css_cascade() {
+    let (_, stderr) = compile(".a { Color: 1 !important }", &["--cascade", "none"]);
+    assert!(stderr.contains("!important"), "{stderr}");
+}
+// ---------- 11. --color-format ----------
+
+#[test]
+fn color_format_hex() {
+    let (stdout, _stderr) = compile(".a { Color: rgb(255, 0, 0) }", &["--color-format", "hex"]);
+    assert!(stdout.contains(r##"Color3.fromHex("#ff0000")"##), "stdout:\n{stdout}");
+}
+
+#[test]
+fn color_format_float() {
+    let (stdout, _stderr) = compile(".a { Color: rgb(255, 0, 0) }", &["--color-format", "float"]);
+    assert!(stdout.contains("Color3.new(1, 0, 0)"), "stdout:\n{stdout}");
+}
+
+// ---------- 12. --rem ----------
+
+#[test]
+fn rem_scales_rem_units_on_roblox_properties() {
+    let (stdout, _stderr) = compile(".a { TextSize: 2rem }", &["--rem", "10"]);
+    assert!(stdout.contains("TextSize = 20"), "stdout:\n{stdout}");
+}
+
+#[test]
+fn rem_scales_approx_font_size() {
+    let (stdout, _stderr) = compile(".a { font-size: 1.5rem }", &["--rem", "10", "--approx"]);
+    assert!(stdout.contains("TextSize = 15"), "stdout:\n{stdout}");
+}
+
+// ---------- 13. --default-font ----------
+
+#[test]
+fn default_font_used_when_only_weight_given() {
+    let (stdout, _stderr) =
+        compile(".a { font-weight: bold }", &["--approx", "--default-font", "rbxasset://fonts/families/Foo.json"]);
+    assert!(stdout.contains("rbxasset://fonts/families/Foo.json"), "stdout:\n{stdout}");
+}
+
+// ---------- 14. --sheet-name / --no-header ----------
+
+#[test]
+fn sheet_name_sets_stylesheet_name() {
+    let (stdout, _stderr) = compile(".a { Color: 1 }", &["--sheet-name", "Foo"]);
+    assert!(stdout.contains(r#"sheet.Name = "Foo""#), "stdout:\n{stdout}");
+}
+
+#[test]
+fn header_present_by_default_and_removed_with_no_header() {
+    let (with_header, _) = compile(".a { Color: 1 }", &[]);
+    assert!(with_header.contains("Generated by outlass"), "stdout:\n{with_header}");
+
+    let (without_header, _) = compile(".a { Color: 1 }", &["--no-header"]);
+    assert!(!without_header.contains("Generated by outlass"), "stdout:\n{without_header}");
+}
+
+// ---------- 15. -q / --deny-warnings ----------
+
+#[test]
+fn quiet_suppresses_warnings() {
+    let dir = TempDir::new("quiet");
+    let input = dir.write("warn.scss", ".a { opacity: 0.5 }\n");
+    let (code, _stdout, stderr) = run(&["-q", input.to_str().unwrap(), "-o", "-"], None);
+    assert_eq!(code, 0);
+    assert!(stderr.is_empty(), "stderr should be empty with -q:\n{stderr}");
+}
+
+#[test]
+fn deny_warnings_fails_and_writes_no_file_when_warnings_present() {
+    let dir = TempDir::new("deny-warn");
+    let input = dir.write("warn.scss", ".a { opacity: 0.5 }\n");
+    let out = dir.path().join("dw.luau");
+    let (code, _stdout, stderr) = run(&["--deny-warnings", input.to_str().unwrap(), "-o", out.to_str().unwrap()], None);
+    assert_eq!(code, 1, "stderr: {stderr}");
+    assert!(!out.exists(), "no output file should be written when --deny-warnings trips");
+}
+
+#[test]
+fn deny_warnings_succeeds_when_no_warnings() {
+    let dir = TempDir::new("deny-warn-ok");
+    let input = dir.write("ok.scss", ".a { Color: 1 }\n");
+    let out = dir.path().join("dw.luau");
+    let (code, _stdout, stderr) = run(&["--deny-warnings", input.to_str().unwrap(), "-o", out.to_str().unwrap()], None);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(out.is_file());
+}
+
+// ---------- 16. --watch + stdin ----------
+
+#[test]
+fn watch_cannot_be_combined_with_stdin() {
+    let (code, _stdout, stderr) = run(&["--watch", "-", "-o", "-"], Some(".a { Color: 1 }"));
+    assert_eq!(code, 2, "stderr: {stderr}");
+}
+
+// ---------- 17. compile errors ----------
+
+#[test]
+fn compile_error_has_file_line_col_location() {
+    let dir = TempDir::new("compile-error");
+    let input = dir.write("err.scss", ".a {\n  Color: $undefined;\n}\n");
+    let (code, _stdout, stderr) = run(&[input.to_str().unwrap(), "-o", "-"], None);
+    assert_eq!(code, 1, "stderr: {stderr}");
+    assert!(stderr.contains("error:"), "stderr:\n{stderr}");
+    assert!(stderr.contains(":2:"), "stderr should reference line 2:\n{stderr}");
+}
+
+// ---------- 18. `properties` subcommand ----------
+
+#[test]
+fn properties_lists_group_headings() {
+    let (code, stdout, stderr) = run(&["properties"], None);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("box (--approx=box)"), "stdout:\n{stdout}");
+}
+
+#[test]
+fn properties_single_property_mentions_uicorner() {
+    let (code, stdout, stderr) = run(&["properties", "border-radius"], None);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("UICorner"), "stdout:\n{stdout}");
+}
+
+#[test]
+fn properties_group_filter_shows_only_that_group() {
+    let (code, stdout, stderr) = run(&["properties", "-g", "opacity"], None);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("opacity"), "stdout:\n{stdout}");
+    assert!(!stdout.contains("border-radius"), "stdout:\n{stdout}");
+}
+
+#[test]
+fn properties_unknown_property_is_an_error() {
+    let (code, _stdout, _stderr) = run(&["properties", "margin"], None);
+    assert_eq!(code, 1);
+}
+
+// ---------- 19. `functions` subcommand ----------
+
+#[test]
+fn functions_lists_math_div_and_lighten() {
+    let (code, stdout, stderr) = run(&["functions"], None);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("math.div"), "stdout:\n{stdout}");
+    assert!(stdout.contains("lighten"), "stdout:\n{stdout}");
+}
+
+#[test]
+fn functions_filter_color_shows_color_functions_only() {
+    let (code, stdout, stderr) = run(&["functions", "color"], None);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("color.adjust"), "stdout:\n{stdout}");
+    assert!(!stdout.contains("math.div"), "stdout:\n{stdout}");
+}
+
+#[test]
+fn functions_filter_matching_nothing_is_an_error() {
+    let (code, _stdout, _stderr) = run(&["functions", "zzzz"], None);
+    assert_eq!(code, 1);
+}
+
+// ---------- 20. --version / no args ----------
+
+#[test]
+fn version_prints_cargo_version() {
+    let (code, stdout, stderr) = run(&["--version"], None);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let expected = env!("CARGO_PKG_VERSION");
+    assert!(stdout.contains(expected), "stdout `{stdout}` should contain version `{expected}`");
+}
+
+#[test]
+fn no_args_is_a_usage_error() {
+    let (code, _stdout, _stderr) = run(&[], None);
+    assert_eq!(code, 2);
+}
+
+// ---------- 21. Roblox mapping claims ----------
+
+#[test]
+fn descendant_combinator_becomes_double_gt() {
+    let (stdout, _stderr) = compile(".a .b { Color: 1 }", &[]);
+    assert!(stdout.contains(r#"".a >> .b""#), "stdout:\n{stdout}");
+}
+
+#[test]
+fn pseudo_classes_map_to_roblox_states() {
+    let (stdout, _stderr) = compile(".a:hover { Color: 1 }\n.b:active { Color: 2 }\n.c:disabled { Color: 3 }\n", &[]);
+    assert!(stdout.contains(r#"".a:Hover""#), "stdout:\n{stdout}");
+    assert!(stdout.contains(r#"".b:Press""#), "stdout:\n{stdout}");
+    assert!(stdout.contains(r#"".c:NonInteractable""#), "stdout:\n{stdout}");
+}
+
+#[test]
+fn custom_property_in_rule_becomes_set_attribute() {
+    let (stdout, _stderr) = compile(".a { --Name: blue; }", &[]);
+    assert!(stdout.contains(r#"SetAttribute("Name", Color3.fromRGB(0, 0, 255))"#), "stdout:\n{stdout}");
+}
+
+#[test]
+fn custom_property_in_root_goes_on_stylesheet() {
+    let (stdout, _stderr) = compile(":root { --Red: red; }", &[]);
+    assert!(stdout.contains(r#"sheet:SetAttribute("Red", Color3.fromRGB(255, 0, 0))"#), "stdout:\n{stdout}");
+}
+
+#[test]
+fn var_reference_becomes_token_string() {
+    let (stdout, _stderr) = compile(":root { --Brand: red; }\n.a { Color: var(--Brand); }", &[]);
+    assert!(stdout.contains(r#"Color = "$Brand""#), "stdout:\n{stdout}");
+}
+
+#[test]
+fn priority_at_rule_sets_priority_and_nested_inherits() {
+    let scss = ".a {\n  @priority 3;\n  Color: 1;\n  &:hover {\n    Color: 2;\n  }\n}\n#b { Color: 3 }\n";
+    let (stdout, _stderr) = compile(scss, &["--cascade", "none"]);
+    assert!(stdout.contains(r#"rule(sheet, ".a", 3, {"#), "stdout:\n{stdout}");
+    assert!(stdout.contains(r#"rule(sheet, ".a:Hover", 3, {"#), "stdout:\n{stdout}");
+    // With the CSS cascade, tier 3 beats the more specific #b, and :hover beats its base rule.
+    let (stdout, _stderr) = compile(scss, &[]);
+    assert!(priority_of(&stdout, ".a") > priority_of(&stdout, "#b"), "stdout:\n{stdout}");
+    assert!(priority_of(&stdout, ".a:Hover") > priority_of(&stdout, ".a"), "stdout:\n{stdout}");
+}
+
+#[test]
+fn grid_tracks_become_a_cell_count_and_cell_size() {
+    let scss = ".grid {\n  display: grid;\n  grid-template-columns: repeat(3, 68px);\n  grid-auto-rows: 68px;\n  gap: 6px;\n}\n";
+    let (stdout, stderr) = compile(scss, &["--approx"]);
+    assert!(stdout.contains("FillDirectionMaxCells = 3"), "stdout:\n{stdout}");
+    assert!(stdout.contains("CellSize = UDim2.new(0, 68, 0, 68)"), "stdout:\n{stdout}");
+    assert!(stdout.contains("CellPadding = UDim2.new(0, 6, 0, 6)"), "stdout:\n{stdout}");
+    assert!(!stderr.contains("warning"), "stderr:\n{stderr}");
+}
+
+#[test]
+fn transition_property_becomes_tween_info() {
+    let (stdout, _stderr) = compile(".a { Transition: BackgroundColor3 0.2s Linear In; }", &[]);
+    assert!(
+        stdout.contains("TweenInfo.new(0.2, Enum.EasingStyle.Linear, Enum.EasingDirection.In)"),
+        "stdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn pascal_case_at_rule_prefixes_its_rules_with_the_query() {
+    let (stdout, _stderr) = compile("@PreferredInputTouch { Frame { Visible: false } }", &[]);
+    assert!(stdout.contains(r#"rule(sheet, "@PreferredInputTouch Frame", "#), "stdout:\n{stdout}");
+    // A hand-made query (a StyleQuery the author created) is referenced by name.
+    let (stdout, _stderr) = compile("@MyQuery { .a { Visible: false } }", &[]);
+    assert!(stdout.contains(r#""@MyQuery .a""#), "stdout:\n{stdout}");
+}
+
+#[test]
+fn media_features_with_documented_equivalents_use_builtin_queries() {
+    let cases = [
+        ("(prefers-reduced-motion: reduce)", "@ReducedMotionEnabledTrue"),
+        ("(prefers-reduced-motion: no-preference)", "@ReducedMotionEnabledFalse"),
+        ("(pointer: coarse)", "@PreferredInputTouch"),
+        ("(pointer: fine)", "@PreferredInputKeyboardAndMouse"),
+        ("(any-pointer: coarse)", "@PreferredInputGamepad"),
+        ("(max-width: 600px)", "@ViewportDisplaySizeSmall"),
+        ("(min-width: 601px) and (max-width: 1200px)", "@ViewportDisplaySizeMedium"),
+        ("(min-width: 1201px)", "@ViewportDisplaySizeLarge"),
+    ];
+    for (media, query) in cases {
+        let (stdout, _stderr) = compile(&format!("@media {media} {{ .c {{ Color: 1 }} }}"), &[]);
+        assert!(stdout.contains(&format!("\"{query} .c\"")), "{media} should be {query}:\n{stdout}");
+        assert!(!stdout.contains("::StyleQuery"), "built-ins need no StyleQuery:\n{stdout}");
+    }
+}
+
+#[test]
+fn other_media_queries_become_a_style_query_on_the_screen_gui() {
+    let (out, stderr) = compile(".a { @media (min-width: 900px) and (orientation: landscape) { ZIndex: 2; } }", &[]);
+    assert!(stderr.is_empty(), "{stderr}");
+    assert!(out.contains("rule(sheet, \"ScreenGui::StyleQuery #MediaMinWidth900MinAspect1\", nil, {\n\tMinSize = Vector2.new(900, 0),\n\tAspectRatioRange = NumberRange.new(1, math.huge),"), "{out}");
+    assert!(out.contains("\"@MediaMinWidth900MinAspect1 .a\""), "{out}");
+}
+
+#[test]
+fn container_queries_attach_a_style_query_to_each_container() {
+    let scss = ".panel { container-type: inline-size; }\n.side { container: sidebar / inline-size; }\n\
+                @container (min-width: 400px) { .title { ZIndex: 2; } }\n\
+                @container sidebar (max-width: 200px) { .icon { ZIndex: 3; } }";
+    let (out, stderr) = compile(scss, &["--approx"]);
+    assert!(!stderr.contains("container"), "container declarations are consumed, not warned about:\n{stderr}");
+    assert!(
+        out.contains("\".panel::StyleQuery #ContainerMinWidth400, .side::StyleQuery #ContainerMinWidth400\""),
+        "{out}"
+    );
+    assert!(out.contains("\".side::StyleQuery #ContainerSidebarMaxWidth200\""), "{out}");
+    assert!(
+        !out.contains(".panel::StyleQuery #ContainerSidebar"),
+        "named queries only use matching containers:\n{out}"
+    );
+    assert!(out.contains("\"@ContainerMinWidth400 .title\""), "{out}");
+    assert!(out.contains("\"@ContainerSidebarMaxWidth200 .icon\""), "{out}");
+    let (_, stderr) = compile("@container (min-width: 400px) { .t { ZIndex: 2; } }", &[]);
+    assert!(stderr.contains("no element is declared a container"), "{stderr}");
+}
+
+#[test]
+fn nested_and_listed_queries() {
+    let (out, _) = compile("@media (pointer: coarse) { @media (min-width: 800px) { .a { ZIndex: 1; } } }", &[]);
+    assert!(out.contains("\"@MediaMinWidth800Touch .a\""), "nested queries combine into one:\n{out}");
+    let (out, _) = compile("@media (pointer: coarse), (max-width: 600px) { .a { ZIndex: 1; } }", &[]);
+    assert!(out.contains("\"@PreferredInputTouch .a\"") && out.contains("\"@ViewportDisplaySizeSmall .a\""), "{out}");
+    let (out, stderr) = compile("@media print { .a { ZIndex: 1; } } @media not screen { .b { ZIndex: 1; } }", &[]);
+    assert!(!out.contains(".a\"") && !out.contains(".b\""), "{out}");
+    assert!(stderr.contains("not"), "{stderr}");
+}
+
+#[test]
+fn value_units_are_converted() {
+    let (stdout, _stderr) = compile(".vals {\n  Size: 10px;\n  Opacity: 50%;\n  Time: 1000ms;\n}\n", &[]);
+    assert!(stdout.contains("Size = 10"), "stdout:\n{stdout}");
+    assert!(stdout.contains("Opacity = 0.5"), "stdout:\n{stdout}");
+    assert!(stdout.contains("Time = 1"), "stdout:\n{stdout}");
+}
+
+// ----- regressions found during review -----
+
+#[test]
+fn grid_gap_does_not_create_list_layout() {
+    let (out, _) = compile(".g { display: grid; gap: 4px 8px; }", &["--approx"]);
+    assert!(out.contains("CellPadding = UDim2.new(0, 8, 0, 4)"), "{out}");
+    assert!(!out.contains("UIListLayout"), "grid gap leaked into a UIListLayout:\n{out}");
+}
+
+#[test]
+fn clamp_folds_compatible_numbers() {
+    let (out, _) = compile(".a { TextSize: clamp(10px, 30px, 24px); ZIndex: clamp(1, 0, 5); }", &[]);
+    assert!(out.contains("TextSize = 24"), "{out}");
+    assert!(out.contains("ZIndex = 1"), "{out}");
+}
+
+#[test]
+fn properties_accepts_vendor_prefixed_names() {
+    let (code, stdout, stderr) = run(&["properties", "-webkit-text-stroke"], None);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("UIStroke"), "{stdout}");
+}
+
+#[test]
+fn raw_color_alpha_is_warned_about() {
+    let (_, stderr) = compile(".a { BackgroundColor3: rgba(0, 0, 0, 0.5); }", &[]);
+    assert!(stderr.contains("Color3 has no alpha channel"), "{stderr}");
+}
+
+#[test]
+fn single_axis_size_warns() {
+    let (out, stderr) = compile(".a { height: 48px; }", &["--approx=size"]);
+    assert!(out.contains("AutomaticSize = Enum.AutomaticSize.X"), "{out}");
+    assert!(stderr.contains("only `height` is set"), "{stderr}");
+}
+
+// ----- CSS fidelity: idiomatic CSS maps onto faithful Roblox results -----
+
+#[test]
+fn absolute_edges_stretch_like_css() {
+    let (out, stderr) = compile(
+        ".fill { position: absolute; inset: 0; } .bar { position: absolute; top: 8px; left: 12px; right: 12px; height: 4px; }",
+        &["--approx"],
+    );
+    assert!(out.contains("Size = UDim2.new(1, 0, 1, 0)"), "{out}");
+    assert!(out.contains("Size = UDim2.new(1, -24, 0, 4)"), "{out}");
+    assert!(out.contains("Position = UDim2.new(0, 12, 0, 8)"), "{out}");
+    assert!(!stderr.contains("both set"), "{stderr}");
+    assert!(!stderr.contains("only `height`"), "{stderr}");
+}
+
+#[test]
+fn composite_properties_cascade_per_axis() {
+    let (out, _) = compile(
+        ".bar { position: absolute; top: 36px; width: 3px; height: 9px; &.left { left: 34%; } }",
+        &["--approx"],
+    );
+    let left_rule = &out[out.find("\".bar.left\"").unwrap()..];
+    assert!(left_rule.contains("Position = UDim2.new(0.34, 0, 0, 36)"), "{out}");
+}
+
+#[test]
+fn opacity_fades_canvas_groups() {
+    let (out, _) = compile(".card { opacity: 0.25; transition: opacity 0.2s ease-out; }", &["--approx"]);
+    assert!(out.contains("GroupTransparency = 0.75"), "{out}");
+    assert!(out.contains("TextTransparency = 0.75"), "{out}");
+    assert!(out.contains("GroupTransparency = TweenInfo.new(0.2"), "{out}");
+}
+
+#[test]
+fn mask_image_becomes_gradient_transparency() {
+    let (out, stderr) = compile(
+        ".track { mask-image: linear-gradient(to right, transparent, black 14%, black 86%, transparent); }",
+        &["--approx"],
+    );
+    assert!(out.contains("Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.14, 0), NumberSequenceKeypoint.new(0.86, 0), NumberSequenceKeypoint.new(1, 1)})"), "{out}");
+    assert!(out.contains("Rotation = 0"), "{out}");
+    assert!(!stderr.contains("mask-image"), "{stderr}");
+}
+
+#[test]
+fn gradient_text_idiom() {
+    let (out, stderr) = compile(
+        ".gold { background: linear-gradient(#ffe29a, #ffb347); background-clip: text; color: transparent; }",
+        &["--approx"],
+    );
+    assert!(out.contains("TextColor3 = Color3.fromRGB(255, 255, 255)"), "{out}");
+    assert!(out.contains("BackgroundTransparency = 1"), "{out}");
+    assert!(!out.contains("TextTransparency = 1"), "text must stay visible:\n{out}");
+    assert!(out.contains("\".gold::UIGradient\""), "{out}");
+    assert!(stderr.is_empty(), "{stderr}");
+}
+
+#[test]
+fn cubic_bezier_maps_to_roblox_easing() {
+    // Properties with distinct Roblox targets, so each entry's easing is visible.
+    let (out, stderr) = compile(
+        ".a { transition: left 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), color 1s cubic-bezier(0.16, 1, 0.3, 1), z-index 1s cubic-bezier(0.25, 0.25, 0.75, 0.75); }",
+        &["--approx"],
+    );
+    assert!(out.contains("TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out)"), "{out}");
+    assert!(out.contains("TweenInfo.new(1, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)"), "{out}");
+    assert!(out.contains("TweenInfo.new(1, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut)"), "{out}");
+    assert!(!stderr.contains("cubic-bezier"), "{stderr}");
+}
+
+#[test]
+fn transitions_reach_pseudo_instances() {
+    let (out, _) = compile(".pop { transform: scale(1); transition: transform 0.2s ease-out; }", &["--approx"]);
+    let scale_rule = &out[out.find("\".pop::UIScale\"").unwrap()..];
+    assert!(scale_rule.contains("Scale = TweenInfo.new(0.2"), "{out}");
+}
+
+#[test]
+fn borders_clear_the_legacy_border() {
+    let (out, _) = compile("Frame { border: none; } .card { border: 1px solid #fff; }", &["--approx"]);
+    assert_eq!(out.matches("BorderSizePixel = 0").count(), 2, "{out}");
+    assert!(out.contains("Enabled = false"), "{out}");
+    assert!(out.contains("Enabled = true"), "{out}");
+}
+
+#[test]
+fn background_none_only_clears_the_background() {
+    let (out, _) = compile(".label { background: none; }", &["--approx"]);
+    assert!(out.contains("BackgroundTransparency = 1"), "{out}");
+    assert!(!out.contains("BackgroundColor3"), "{out}");
+}
+
+#[test]
+fn repeating_linear_gradient_is_written_out_stop_by_stop() {
+    // Roblox has no repeating gradient, but a UIGradient holds 20 keypoints, which is room for
+    // the pattern written out by hand.
+    let (out, stderr) = compile(
+        ".stripes { background: repeating-linear-gradient(45deg, #222 0 10%, #444 10% 20%); }",
+        &["--approx", "--color-format", "hex"],
+    );
+    let gradient = &out[out.find("\".stripes::UIGradient\"").unwrap()..];
+    // Five copies of the two-colour pattern, each ending in a hard stop (two keypoints at one time).
+    assert_eq!(gradient[..gradient.find('}').unwrap()].matches("ColorSequenceKeypoint.new(").count(), 20, "{out}");
+    assert!(gradient.contains(r##"ColorSequenceKeypoint.new(0, Color3.fromHex("#222222")), ColorSequenceKeypoint.new(0.1, Color3.fromHex("#222222")), ColorSequenceKeypoint.new(0.1, Color3.fromHex("#444444")), ColorSequenceKeypoint.new(0.2, Color3.fromHex("#444444")), ColorSequenceKeypoint.new(0.2, Color3.fromHex("#222222"))"##), "{out}");
+    assert!(gradient.contains("Rotation = -45"), "{out}");
+    assert!(stderr.is_empty(), "{stderr}");
+
+    // A mask repeats the same way, and its hard stops survive as two keypoints at one time.
+    let (out, _) = compile(
+        ".fade { mask-image: repeating-linear-gradient(to right, black 0 10%, transparent 10% 20%); }",
+        &["--approx"],
+    );
+    assert!(
+        out.contains(
+            "NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(0.1, 0), NumberSequenceKeypoint.new(0.1, 1)"
+        ),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_repeating_gradient_that_does_not_fit_warns_instead_of_erroring_in_roblox() {
+    let (out, stderr) =
+        compile(".fine { background: repeating-linear-gradient(90deg, #f00 0 2%, #00f 2% 4%); }", &["--approx"]);
+    let gradient = &out[out.find("\".fine::UIGradient\"").unwrap()..];
+    let gradient = &gradient[..gradient.find('}').unwrap()];
+    assert_eq!(gradient.matches("ColorSequenceKeypoint.new(").count(), 20, "{out}");
+    // Roblox rejects a sequence that doesn't end at 1.
+    assert!(gradient.contains("ColorSequenceKeypoint.new(1, "), "{out}");
+    assert!(stderr.contains("a Roblox sequence holds 20"), "{stderr}");
+}
+
+#[test]
+fn gradient_stop_positions_follow_css() {
+    // A first stop past 0 holds its colour back to the start, rather than being dragged to 0.
+    let (out, stderr) =
+        compile(".a { background: linear-gradient(to right, red 50%, blue); }", &["--approx", "--color-format", "hex"]);
+    assert!(out.contains(r##"ColorSequenceKeypoint.new(0, Color3.fromHex("#ff0000")), ColorSequenceKeypoint.new(0.5, Color3.fromHex("#ff0000")), ColorSequenceKeypoint.new(1, Color3.fromHex("#0000ff"))"##), "{out}");
+    assert!(stderr.is_empty(), "{stderr}");
+
+    // A bare percentage is a colour hint: the two colours are mixed half and half there.
+    let (out, _) =
+        compile(".b { background: linear-gradient(black, 25%, white); }", &["--approx", "--color-format", "hex"]);
+    assert!(out.contains(r##"ColorSequenceKeypoint.new(0.25, Color3.fromHex("#808080"))"##), "{out}");
+
+    // Radial and conic gradients say what's wrong instead of "expected a color".
+    let (_, stderr) = compile(".c { background: radial-gradient(red, blue); }", &["--approx"]);
+    assert!(stderr.contains("a UIGradient is linear"), "{stderr}");
+
+    // A stack of background layers still finds the gradient in it, instead of dropping the whole
+    // declaration on the floor.
+    let (out, stderr) = compile(".d { background: linear-gradient(#000, #111), #222; }", &["--approx"]);
+    assert!(out.contains("\".d::UIGradient\""), "{out}");
+    assert!(stderr.is_empty(), "{stderr}");
+}
+
+#[test]
+fn a_gradient_is_painted_over_the_background_colour_like_css() {
+    // A UIGradient multiplies BackgroundColor3 and has no way to cover it, where CSS paints
+    // `background-image` over `background-color`. So the colour is flattened into the stops and the
+    // element is painted white, which makes the multiply a no-op.
+    //
+    // Opaque stops hide the colour completely, exactly as they do in a browser.
+    let (out, stderr) = compile(
+        ".plate { background-color: #204060; background-image: linear-gradient(#ffffff, #000000); }",
+        &["--approx", "--color-format", "hex"],
+    );
+    assert!(out.contains(r##"BackgroundColor3 = Color3.fromHex("#ffffff")"##), "{out}");
+    assert!(
+        !out.contains(r##"Color3.fromHex("#204060")"##),
+        "an opaque gradient hides the colour:
+{out}"
+    );
+    assert!(out.contains(r##"ColorSequenceKeypoint.new(0, Color3.fromHex("#ffffff")), ColorSequenceKeypoint.new(1, Color3.fromHex("#000000"))"##), "{out}");
+    assert!(stderr.is_empty(), "{stderr}");
+
+    // Translucent stops blend with it instead: 50% red over black is half-brightness red, opaque.
+    let (out, _) = compile(
+        ".tint { background-color: #000000; background-image: linear-gradient(rgba(255, 0, 0, 0.5), rgba(255, 0, 0, 0.5)); }",
+        &["--approx", "--color-format", "hex"],
+    );
+    assert!(out.contains(r##"ColorSequenceKeypoint.new(0, Color3.fromHex("#800000"))"##), "{out}");
+    assert!(
+        !out.contains("Transparency = NumberSequence"),
+        "the blend is opaque:
+{out}"
+    );
+
+    // With nothing underneath, the stop alphas stay in the UIGradient's Transparency.
+    let (out, _) = compile(".fade { background-image: linear-gradient(#f00, transparent); }", &["--approx"]);
+    assert!(
+        out.contains(
+            "Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(1, 1)})"
+        ),
+        "{out}"
+    );
+}
+
+#[test]
+fn text_stroke_survives_a_border_reset() {
+    let (out, _) = compile("TextLabel { border: none; } .title { -webkit-text-stroke: 1px black; }", &["--approx"]);
+    let title = &out[out.find("\".title::UIStroke\"").unwrap()..];
+    assert!(title[..title.find('}').unwrap()].contains("Enabled = true"), "{out}");
+}
+
+#[test]
+fn webkit_text_stroke_longhands_and_current_color() {
+    // -webkit-text-stroke is the property browsers implement; the unprefixed spelling isn't CSS.
+    let (code, stdout, _) = run(&["properties", "-webkit-text-stroke-color"], None);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(stdout.starts_with("-webkit-text-stroke-color"), "{stdout}");
+
+    // An omitted colour is currentColor, i.e. the rule's own `color`.
+    let (out, stderr) = compile(
+        ".a { color: #ff0000; -webkit-text-stroke: 2px; }          .b { -webkit-text-stroke-width: 1px; -webkit-text-stroke-color: #00ff00; }          .c { -webkit-text-stroke: 0 #000; }",
+        &["--approx", "--color-format", "hex"],
+    );
+    let a = &out[out.find("\".a::UIStroke\"").unwrap()..];
+    assert!(a[..a.find('}').unwrap()].contains(r##"Color = Color3.fromHex("#ff0000")"##), "{out}");
+    let b = &out[out.find("\".b::UIStroke\"").unwrap()..];
+    let b = &b[..b.find('}').unwrap()];
+    assert!(b.contains("Thickness = 1") && b.contains(r##"Color = Color3.fromHex("#00ff00")"##), "{out}");
+    // A zero width draws nothing, and says so, so it can undo a weaker rule's stroke.
+    let c = &out[out.find("\".c::UIStroke\"").unwrap()..];
+    assert!(c[..c.find('}').unwrap()].contains("Enabled = false"), "{out}");
+    assert!(stderr.is_empty(), "{stderr}");
+}
+
+#[test]
+fn lass_nested_bare_selectors_attach_to_parent() {
+    let dir = TempDir::new("lass-attach");
+    let input = dir.write("x.lass", ".clock\n\tBackgroundTransparency: 0.1\n\t::UIGradient\n\t\tRotation: 90\n.left\n\t.active:Hover\n\t\tE: 1\n\t> .title\n\t\tF: 2\n");
+    let (code, out, stderr) = run(&[input.to_str().unwrap(), "-o", "-"], None);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(out.contains("\".clock::UIGradient\""), "{out}");
+    assert!(out.contains("\".left.active:Hover\""), "{out}");
+    assert!(out.contains("\".left > .title\""), "{out}");
+}
+
+#[test]
+fn star_transition_is_the_default_transition() {
+    let (out, _) = compile("Frame { Transition: * 0.5s; }", &[]);
+    assert!(
+        out.contains(
+            "SetDefaultPropertyTransition(TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out))"
+        ),
+        "{out}"
+    );
+}
+
+#[test]
+fn lass_values_with_luau_tables_pass_through() {
+    let dir = TempDir::new("lass-raw");
+    let input = dir.write("x.lass", ".clock\n\t::UIGradient\n\t\tColor: ColorSequence.new({ColorSequenceKeypoint.new(0, Color3.fromHex(\"#2f1717\")), ColorSequenceKeypoint.new(1, Color3.fromHex(\"#554141\"))})\n.empty\n");
+    let (code, out, stderr) = run(&[input.to_str().unwrap(), "-o", "-"], None);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(out.contains(r##"Color = ColorSequence.new({ColorSequenceKeypoint.new(0, Color3.fromHex("#2f1717")), ColorSequenceKeypoint.new(1, Color3.fromHex("#554141"))}),"##), "{out}");
+}
+
+#[test]
+fn cascaded_state_rules_do_not_add_properties() {
+    // `.t.positive` sets a colour, so it emits that colour and the transparency the colour implies
+    // (combined with the opacity it inherits from `.t`) — but nothing else: it must not re-emit the
+    // base rule's Size, which would compete with the sibling `.wide` state.
+    let (out, _) = compile(
+        ".t { opacity: 0; width: 10px; height: 10px; } .t.positive { color: red; } .wide .t { width: 50px; height: 10px; }",
+        &["--approx"],
+    );
+    let positive = &out[out.find("\".t.positive\"").unwrap()..];
+    let positive = &positive[..positive.find('}').unwrap()];
+    assert!(positive.contains("TextColor3"), "{out}");
+    assert!(
+        positive.contains("TextTransparency = 1"),
+        "the inherited `opacity: 0` still applies:
+{out}"
+    );
+    assert!(!positive.contains("Size"), "{out}");
+}
+
+#[test]
+fn an_opaque_colour_undoes_a_weaker_rules_transparency() {
+    // Roblox has one Transparency slot where CSS has a colour alpha and an `opacity`, so a rule that
+    // paints an opaque background has to say so; otherwise the weaker rule's transparency sticks and
+    // the element stays invisible.
+    let (out, _) = compile(
+        ".panel { background-color: transparent; color: rgba(255, 0, 0, 0.5); }          .panel.solid { background-color: #123456; color: #fff; }",
+        &["--approx"],
+    );
+    let solid = &out[out.find("\".panel.solid\"").unwrap()..];
+    let solid = &solid[..solid.find('}').unwrap()];
+    assert!(solid.contains("BackgroundTransparency = 0"), "{out}");
+    assert!(solid.contains("TextTransparency = 0"), "{out}");
+    assert!(priority_of(&out, ".panel.solid") > priority_of(&out, ".panel"), "{out}");
+}
+
+#[test]
+fn utf8_byte_order_mark_is_ignored() {
+    let (out, _) = compile("\u{FEFF}// comment\n.a { ZIndex: 2; }", &[]);
+    assert!(out.contains("ZIndex = 2"), "{out}");
+}
+
+#[test]
+fn transition_only_pseudo_rules_are_limited_to_neutral_classes() {
+    let (out, _) =
+        compile(".t { opacity: 0; transition: opacity 0.2s, transform 0.2s, border-radius 0.2s; }", &["--approx"]);
+    assert!(out.contains("\".t::UIScale\""), "{out}");
+    assert!(!out.contains("\".t::UIStroke\""), "a default UIStroke would draw an outline:\n{out}");
+    assert!(!out.contains("\".t::UICorner\""), "a default UICorner would round the corners:\n{out}");
+}
+
+#[test]
+fn stroke_resets_are_dropped_when_nothing_enables_a_stroke() {
+    let (out, _) = compile("Frame { border: none; }", &["--approx"]);
+    assert!(out.contains("BorderSizePixel = 0"), "{out}");
+    assert!(!out.contains("UIStroke"), "{out}");
+    let (out, _) = compile("Frame { border: none; } .card { border: 1px solid red; }", &["--approx"]);
+    assert!(out.contains("\"Frame::UIStroke\""), "the reset matters once a stroke exists:\n{out}");
+}
+
+#[test]
+fn zero_percent_translate_still_sets_the_anchor() {
+    let (out, _) =
+        compile(".tl { position: absolute; left: 0%; top: 0%; transform: translate(-0%, -0%); }", &["--approx"]);
+    assert!(out.contains("AnchorPoint = Vector2.new(0, 0)"), "{out}");
+}
+
+#[test]
+fn fit_content_alone_only_sets_automatic_size() {
+    let (out, stderr) =
+        compile(".as-x { width: fit-content; } .as-xy { width: fit-content; height: fit-content; }", &["--approx"]);
+    assert!(out.contains("AutomaticSize = Enum.AutomaticSize.X,"), "{out}");
+    assert!(out.contains("AutomaticSize = Enum.AutomaticSize.XY,"), "{out}");
+    assert!(!out.contains("\tSize = UDim2"), "no length given, so Size must be left alone:\n{out}");
+    assert!(!stderr.contains("only `width`"), "{stderr}");
+}
+
+#[test]
+fn display_flex_only_forces_visible_when_something_hides() {
+    let (out, _) = compile(".row { display: flex; }", &["--approx"]);
+    assert!(!out.contains("Visible"), "{out}");
+    let (out, _) = compile(".row { display: flex; } .row.gone { display: none; }", &["--approx"]);
+    assert!(out.contains("Visible = true"), "{out}");
+    assert!(out.contains("Visible = false"), "{out}");
+}
+
+#[test]
+fn content_and_appearance_map_to_text_and_auto_button_color() {
+    let (out, stderr) = compile("TextButton { content: \"\"; appearance: none; }", &["--approx"]);
+    assert!(out.contains("Text = \"\""), "{out}");
+    assert!(out.contains("AutoButtonColor = false"), "{out}");
+    assert!(stderr.is_empty(), "{stderr}");
+}
+
+#[test]
+fn rich_text_is_on_by_default_below_every_rule() {
+    let (out, _) = compile(".plain { RichText: false; }", &[]);
+    assert!(out.contains("rule(sheet, \"TextLabel, TextButton, TextBox\", 0, {\n\tRichText = true,"), "{out}");
+    // Text wraps by default, as `white-space: normal` does in CSS.
+    let (wrapped, _) = compile(".nowrap { white-space: nowrap; }", &["--approx"]);
+    assert!(wrapped.contains("RichText = true,\n\tTextWrapped = true,"), "{wrapped}");
+    assert!(wrapped.contains("TextWrapped = false"), "an author rule must be able to opt out:\n{wrapped}");
+    assert!(priority_of(&out, ".plain") > 0.0, "an author rule must override the default:\n{out}");
+    let (out, _) = compile("@priority -5;\n.plain { RichText: false; }", &["--cascade", "none"]);
+    assert!(out.contains("rule(sheet, \"TextLabel, TextButton, TextBox\", -6, {"), "{out}");
+}
+
+#[test]
+fn elements_are_content_sized_by_default_and_a_css_size_turns_that_off() {
+    // A fresh GuiObject is 0x0, so the user-agent sheet sizes every class from its content, as CSS
+    // sizes a box with no width or height of its own.
+    let (out, _) = compile(".chip { width: 100px; height: 20px; }\n.grow { width: fit-content; }", &["--approx"]);
+    assert!(
+        out.contains(
+            "rule(sheet, \"Frame, TextLabel, TextButton, TextBox, ImageLabel, ImageButton, \
+             ScrollingFrame, CanvasGroup, VideoFrame, ViewportFrame\", 0, {\n\tAutomaticSize = Enum.AutomaticSize.XY,"
+        ),
+        "{out}"
+    );
+    assert!(out.contains("Size = UDim2.new(0, 100, 0, 20),\n\tAutomaticSize = Enum.AutomaticSize.None,"), "{out}");
+    assert!(out.contains("rule(sheet, \".grow\"") && out.contains("AutomaticSize = Enum.AutomaticSize.X,"), "{out}");
+    // Without the size approximations nothing translates to AutomaticSize, so the default is not
+    // overridable and isn't emitted.
+    let (out, _) = compile(".chip { Size: UDim2.new(0, 100, 0, 20); }", &[]);
+    assert!(!out.contains("AutomaticSize"), "{out}");
+}
+
+// ----- dart-sass parity -----
+
+#[test]
+fn extend_reaches_a_used_module_but_not_the_stylesheet_that_uses_it() {
+    // dart-sass scopes extension to the stylesheet the @extend is written in plus everything that
+    // stylesheet loads, transitively — never the other way round.
+    let dir = TempDir::new("extend-scope");
+    dir.write("_base.scss", "%box { border: none; }\n.plain { border-radius: 4px; }\n");
+    dir.write("_leaf.scss", ".leaf { @extend .later !optional; color: red; }\n");
+    let input = dir.write(
+        "main.scss",
+        "@use \"base\";\n@use \"leaf\";\n.card { @extend %box; @extend .plain; }\n.later { z-index: 1; }\n",
+    );
+    let (code, out, stderr) = run(&[input.to_str().unwrap(), "-o", "-", "--approx", "--emit", "css"], None);
+    assert_eq!(code, 0, "{stderr}");
+    // Downstream: main's @extend rewrites the module it uses.
+    assert!(out.contains(".plain, .card"), "{out}");
+    assert!(out.contains(".card {"), "{out}");
+    // Upstream: leaf's @extend cannot reach the stylesheet that loaded it.
+    assert!(!out.contains(".later, .leaf"), "an @extend must not reach the sheet that uses it:\n{out}");
+}
+
+#[test]
+fn an_unfound_extend_target_is_an_error_like_dart_sass() {
+    let dir = TempDir::new("extend-missing");
+    let input = dir.write("main.scss", ".card { @extend %nope; }\n");
+    let (code, _out, stderr) = run(&[input.to_str().unwrap(), "-o", "-"], None);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("The target selector \"%nope\" of @extend was not found"), "{stderr}");
+    assert!(stderr.contains("!optional"), "{stderr}");
+
+    // ...and !optional still silences it.
+    let input = dir.write("ok.scss", ".card { @extend %nope !optional; }\n");
+    let (code, _out, stderr) = run(&[input.to_str().unwrap(), "-o", "-"], None);
+    assert_eq!(code, 0, "{stderr}");
+}
+
+#[test]
+fn imported_files_share_the_importers_extend_scope() {
+    // @import has no module of its own, so its rules and its @extends belong to the importer.
+    let dir = TempDir::new("extend-import");
+    dir.write("_old.scss", "%chip { border-radius: 4px; }\n");
+    let input = dir.write("main.scss", "@import \"old\";\n.tag { @extend %chip; }\n");
+    let (code, out, stderr) = run(&[input.to_str().unwrap(), "-o", "-", "--approx"], None);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(out.contains("\".tag::UICorner\""), "{out}");
+}
+
+#[test]
+fn custom_property_values_are_raw_text_read_back_as_css() {
+    // dart-sass never evaluates a custom property's value; only #{} substitutes into it. outlass
+    // reads the text back as a CSS value so a token still becomes a real Luau value.
+    let (out, stderr) = compile(
+        "$metal: #8a8f98;\n:root { --Metal: #{$metal}; --Elevation: 2; --Font: Enum.Font.Gotham; --Pad: UDim.new(0, 4); }",
+        &[],
+    );
+    assert!(out.contains(r#"sheet:SetAttribute("Metal", Color3.fromRGB(138, 143, 152))"#), "{out}");
+    assert!(out.contains(r#"sheet:SetAttribute("Elevation", 2)"#), "{out}");
+    assert!(out.contains(r#"sheet:SetAttribute("Font", Enum.Font.Gotham)"#), "{out}");
+    assert!(out.contains(r#"sheet:SetAttribute("Pad", UDim.new(0, 4))"#), "{out}");
+    assert!(stderr.is_empty(), "{stderr}");
+
+    // A bare $var is four characters of text, as in dart-sass — said out loud, and never emitted
+    // as Luau that wouldn't parse.
+    let (out, stderr) = compile("$metal: #8a8f98;\n:root { --Metal: $metal; }", &[]);
+    assert!(out.contains(r#"sheet:SetAttribute("Metal", "$metal")"#), "{out}");
+    assert!(stderr.contains("write #{$var}"), "{stderr}");
+}
+
+#[test]
+fn opacity_scales_the_background_instead_of_replacing_it() {
+    // CSS `opacity` fades whatever background the element already has. A rule that sets only
+    // `opacity` can't see a background set by a rule that doesn't cover it, so it must leave
+    // BackgroundTransparency alone rather than guess an opaque one over `transparent`.
+    let (out, _) = compile("Frame { background-color: transparent; } .a { opacity: 0.75; }", &["--approx"]);
+    let a = &out[out.find("\".a\"").unwrap()..];
+    let a = &a[..a.find('}').unwrap()];
+    assert!(!a.contains("BackgroundTransparency"), "{out}");
+    assert!(a.contains("TextTransparency = 0.25"), "{out}");
+
+    // A background it does inherit is scaled, and so is an inherited border.
+    let (out, _) = compile(
+        ".a { background-color: rgba(0, 0, 0, 0.5); border: 1px solid red; } .a:hover { opacity: 0.5; }",
+        &["--approx"],
+    );
+    let hover = &out[out.find("\".a:Hover\"").unwrap()..];
+    let hover = &hover[..hover.find('}').unwrap()];
+    assert!(hover.contains("BackgroundTransparency = 0.75"), "{out}");
+    assert!(!hover.contains("BackgroundColor3"), "{out}");
+    let stroke = &out[out.find("\".a:Hover::UIStroke\"").unwrap()..];
+    let stroke = &stroke[..stroke.find('}').unwrap()];
+    assert!(stroke.contains("Transparency = 0.5"), "{out}");
+    assert!(!stroke.contains("Thickness"), "{out}");
+}
+
+#[test]
+fn scrolling_frames_size_their_canvas_to_the_content() {
+    // A CSS scroll container scrolls exactly its content; a ScrollingFrame's canvas defaults to twice
+    // its height. CanvasSize is a floor under AutomaticCanvasSize, so it has to be zeroed too.
+    let (out, _) = compile(".list { overflow-y: auto; } .list.wide { overflow-x: scroll; }", &["--approx"]);
+    let ua = &out[out.find("\"ScrollingFrame\"").unwrap()..];
+    let ua = &ua[..ua.find('}').unwrap()];
+    assert!(ua.contains("AutomaticCanvasSize = Enum.AutomaticSize.XY"), "{out}");
+    assert!(ua.contains("CanvasSize = UDim2.new()"), "{out}");
+
+    let list = &out[out.find("\".list\"").unwrap()..];
+    let list = &list[..list.find('}').unwrap()];
+    assert!(list.contains("ScrollingDirection = Enum.ScrollingDirection.Y"), "{out}");
+    assert!(list.contains("AutomaticCanvasSize = Enum.AutomaticSize.Y"), "{out}");
+
+    // `.list.wide` inherits `overflow-y: auto` from `.list`, so it scrolls both ways.
+    let wide = &out[out.find("\".list.wide\"").unwrap()..];
+    let wide = &wide[..wide.find('}').unwrap()];
+    assert!(wide.contains("ScrollingDirection = Enum.ScrollingDirection.XY"), "{out}");
+    assert!(wide.contains("AutomaticCanvasSize = Enum.AutomaticSize.XY"), "{out}");
+}
+
+#[test]
+fn scrollbar_width_is_translated_not_rejected() {
+    let (out, stderr) = compile(
+        ".list { overflow-y: auto; scrollbar-width: thin; scrollbar-color: #888 transparent; transition: scrollbar-color 0.2s; } .list:hover { opacity: 0.5; }",
+        &["--approx"],
+    );
+    assert!(!stderr.contains("no Roblox equivalent"), "{stderr}");
+    assert!(out.contains("ScrollBarThickness = 8"), "{out}");
+    assert!(out.contains("ScrollBarImageColor3 = Color3.fromRGB(136, 136, 136)"), "{out}");
+    assert!(out.contains("ScrollBarImageTransparency = TweenInfo.new(0.2"), "{out}");
+    // `:hover`'s opacity fades the thumb `.list` gives it.
+    let hover = &out[out.find("\".list:Hover\"").unwrap()..];
+    let hover = &hover[..hover.find('}').unwrap()];
+    assert!(hover.contains("ScrollBarImageTransparency = 0.5"), "{out}");
+    assert!(!hover.contains("ScrollBarImageColor3"), "{out}");
+}
+
+#[test]
+fn unknown_fonts_warn_and_fall_back_like_css() {
+    // `Gotham` is an easy slip: the built-in family is `GothamSSm`.
+    let (out, stderr) = compile(".a { font-family: Gotham; }", &["--approx"]);
+    assert!(stderr.contains("`Gotham` is not a built-in Roblox font"), "{stderr}");
+    assert!(stderr.contains("did you mean `GothamSSm`?"), "{stderr}");
+    assert!(out.contains("rbxasset://fonts/families/SourceSansPro.json"), "the default font stands in:\n{out}");
+    assert!(!out.contains("Gotham.json"), "{out}");
+
+    // The first family that exists wins, in the shorthand too.
+    let (out, stderr) = compile(".a { font: bold 20px \"Inter\", \"Source Sans Pro\", sans-serif; }", &["--approx"]);
+    assert!(stderr.contains("`Inter`"), "{stderr}");
+    assert!(stderr.contains("using `Source Sans Pro`"), "{stderr}");
+    assert!(out.contains("Font.new(\"rbxasset://fonts/families/SourceSansPro.json\", Enum.FontWeight.Bold"), "{out}");
+    assert!(out.contains("TextSize = 20"), "{out}");
+
+    // Built-in names in any spacing or case, generic families and uploaded fonts are all fine.
+    let (out, stderr) = compile(
+        ".a { font-family: \"builder sans\"; } .b { font-family: monospace; } .c { font-family: \"rbxassetid://123\"; }",
+        &["--approx"],
+    );
+    assert!(!stderr.contains("warning"), "{stderr}");
+    assert!(out.contains("rbxasset://fonts/families/BuilderSans.json"), "{out}");
+    assert!(out.contains("rbxasset://fonts/families/RobotoMono.json"), "{out}");
+    assert!(out.contains("Font.new(\"rbxassetid://123\""), "{out}");
+}

@@ -1,0 +1,43 @@
+@mixin transition
+	Transition: BackgroundColor3, BackgroundTransparency
+
+@priority(10)
+TextButton, TextLabel
+	TextXAlignment: Enum.TextXAlignment.Left
+	AutomaticSize: Enum.AutomaticSize.X
+	RichText: true
+	TextColor3: Color3.fromRGB(255, 255, 255)
+	TextSize: 20
+	FontFace: Font.new "rbxasset://fonts/families/SourceSansPro.json"
+	BorderSizePixel: 0
+	@include transition
+
+TextButton::UICorner, .solid::UICorner
+	CornerRadius: UDim.new(0, 4)
+
+Frame
+	BorderSizePixel: 0
+	BackgroundTransparency: 1
+
+.solid
+	BackgroundColor3: Color3.fromRGB(0, 0, 0)
+	BackgroundTransparency: 0.2
+	
+:root
+	--Red: Color3.fromRGB(1, 0, 0)
+
+TextLabel, TextButton
+	--Blue: Color3.fromRGB(0, 0, 1)
+	& > .title
+		FontFace: Font.new("rbxasset://fonts/families/SourceSansPro.json", Enum.FontWeight.Bold, Enum.FontStyle.Normal)
+
+ImageLabel
+	// Priority only works on the bottom most selector
+	// Pretty sure this is intended behavior
+	@priority(1)
+	&:Hover
+		ImageTransparency: 0.5
+
+.a, .b
+	.h, .j
+		E: 1

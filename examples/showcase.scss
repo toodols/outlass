@@ -1,0 +1,78 @@
+@use "sass:math";
+@use "theme" with ($accent: #10b981);
+
+// Stylesheet-level design tokens (StyleSheet attributes).
+:root {
+  --Surface: #1f2937;
+  --Text: #f9fafb;
+}
+
+%reset {
+  border: none;
+}
+
+Frame {
+  @extend %reset;
+  BackgroundColor3: var(--Surface);
+}
+
+.card {
+  @extend %reset;
+  --Elevation: 2; // a rule-level token
+  background-color: rgba(#000, 0.4);
+  border-radius: theme.$radius;
+  padding: theme.space(md) theme.space(lg);
+  border: 1px solid rgba(white, 0.1);
+
+  &-title {
+    font: bold 20px "GothamSSm";
+    color: var(--Text);
+    text-align: left;
+  }
+
+  > .row {
+    display: flex;
+    gap: theme.space(sm);
+    align-items: center;
+  }
+}
+
+TextButton {
+  @include theme.interactive(theme.$accent);
+  // Raw Roblox properties still work alongside approximations.
+  AutoButtonColor: false;
+  width: calc(100% - #{theme.space(lg) * 2});
+  height: 36px;
+}
+
+@each $name, $size in (small: 14px, body: 16px, large: 24px) {
+  .text-#{$name} {
+    font-size: $size;
+    line-height: math.div($size * 1.25, $size);
+  }
+}
+
+@for $i from 1 through 3 {
+  .z-#{$i} { z-index: $i * 10; }
+}
+
+.modal {
+  @priority 100;
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  opacity: 0.95;
+
+  @media (prefers-reduced-motion: reduce) {
+    transition: none;
+  }
+}
+
+// Bigger touch targets on phones and tablets.
+@PreferredInputTouch {
+  TextButton {
+    width: calc(100% - 16px);
+    height: 48px;
+  }
+}

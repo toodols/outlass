@@ -1,0 +1,19 @@
+// Design tokens shared by every stylesheet. Configure with `@use "theme" with ($accent: ...)`.
+$accent: #3b82f6 !default;
+$radius: 6px !default;
+$spacing: (xs: 2px, sm: 4px, md: 8px, lg: 16px);
+
+@function space($key) {
+  @if not map-has-key($spacing, $key) {
+    @error "Unknown spacing `#{$key}`; expected one of #{map-keys($spacing)}";
+  }
+  @return map-get($spacing, $key);
+}
+
+@mixin interactive($base) {
+  background-color: $base;
+  transition: background-color 150ms ease-out;
+  &:hover { background-color: lighten($base, 8%); }
+  &:active { background-color: darken($base, 8%); }
+  &:disabled { opacity: 0.5; }
+}
