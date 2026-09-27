@@ -114,6 +114,7 @@ pub struct ApproxOptions {
     pub strict: bool,
 }
 
+#[derive(Clone)]
 pub struct Decl {
     pub name: String,
     pub value: Value,
@@ -335,8 +336,18 @@ pub static PROPERTIES: &[PropDoc] = &[
     },
     PropDoc { css: "min-width", group: Group::Size, roblox: "UISizeConstraint (::UISizeConstraint)", notes: "" },
     PropDoc { css: "min-height", group: Group::Size, roblox: "UISizeConstraint (::UISizeConstraint)", notes: "" },
-    PropDoc { css: "max-width", group: Group::Size, roblox: "UISizeConstraint (::UISizeConstraint)", notes: "" },
-    PropDoc { css: "max-height", group: Group::Size, roblox: "UISizeConstraint (::UISizeConstraint)", notes: "" },
+    PropDoc {
+        css: "max-width",
+        group: Group::Size,
+        roblox: "UISizeConstraint (::UISizeConstraint)",
+        notes: "an element sized by its content grows past it unless it's text; on a ScrollingFrame it caps the                 canvas too (both errors under --strict)",
+    },
+    PropDoc {
+        css: "max-height",
+        group: Group::Size,
+        roblox: "UISizeConstraint (::UISizeConstraint)",
+        notes: "like max-width",
+    },
     PropDoc {
         css: "aspect-ratio",
         group: Group::Size,
@@ -492,7 +503,12 @@ pub static PROPERTIES: &[PropDoc] = &[
         notes: "an item that grows with no width starts from 0 (like `flex: 1`) rather than its content, which \
                 a percentage-sized descendant would inflate; this assumes a row, so set a width in a column",
     },
-    PropDoc { css: "flex-shrink", group: Group::Layout, roblox: "UIFlexItem (::UIFlexItem)", notes: "" },
+    PropDoc {
+        css: "flex-shrink",
+        group: Group::Layout,
+        roblox: "UIFlexItem (::UIFlexItem)",
+        notes: "the initial 1 is given to every child of a flex row that doesn't scroll along the line, not                 to columns, where Roblox would shrink content-sized items below their content",
+    },
     PropDoc { css: "flex", group: Group::Layout, roblox: "UIFlexItem (::UIFlexItem)", notes: "basis is ignored" },
     PropDoc { css: "align-self", group: Group::Layout, roblox: "UIFlexItem (::UIFlexItem)", notes: "" },
     PropDoc { css: "order", group: Group::Layout, roblox: "LayoutOrder", notes: "" },
@@ -647,6 +663,48 @@ fn warn_layout_differences(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diag
                     format!(
                         "strict: `{name}: auto` fills the parent in CSS but fits the content in Roblox; write \
                          `{name}: fit-content`, or a length or percentage"
+                    ),
+                    d.span.as_ref(),
+                );
+            }
+        }
+    }
+
+    // A UISizeConstraint caps a ScrollingFrame's canvas along with its window, so the canvas never
+    // outgrows it; and AutomaticSize grows anything but text past its MaxSize (text wraps at it),
+    // while the parent's layout still places the next sibling at the cap. Both measured in Studio.
+    if opts.groups.contains(&Group::Size) {
+        let (stretch_x, stretch_y) = stretched_size(decls, opts);
+        let (scroll_x, scroll_y) =
+            if opts.groups.contains(&Group::Visibility) { scroll_axes(decls) } else { (false, false) };
+        let styles_text = decls.iter().any(|d| {
+            let n = d.name.as_str();
+            n.starts_with("font") || n.starts_with("text-") || matches!(n, "color" | "line-height" | "white-space")
+        });
+        let grows_from_zero = opts.groups.contains(&Group::Layout) && flex_grows(decls);
+        for (axis, max, stretched, scrolls) in [
+            ("width", "max-width", stretch_x.is_some(), scroll_x),
+            ("height", "max-height", stretch_y.is_some(), scroll_y),
+        ] {
+            let Some(d) = last(decls, max).filter(|d| !is(d, "none")) else { continue };
+            let size = last(decls, axis);
+            let automatic = !stretched
+                && size.is_none_or(|s| matches!(axis_length(&s.value, opts), Ok(AxisResult::Auto)))
+                && !(axis == "width" && size.is_none() && grows_from_zero);
+            if scrolls {
+                diag.error(
+                    format!(
+                        "strict: a `{max}` on a scroll container caps its canvas too in Roblox, so the content never \
+                         scrolls; put the `{max}` on a wrapper and give the scroll container `{axis}: 100%`"
+                    ),
+                    d.span.as_ref(),
+                );
+            } else if automatic && !styles_text {
+                diag.error(
+                    format!(
+                        "strict: Roblox grows an element sized by its content past its `{max}` (only text wraps at \
+                         it), overlapping whatever the layout places after the cap; give it a fixed `{axis}`, or make \
+                         it a scroll container inside a capped wrapper"
                     ),
                     d.span.as_ref(),
                 );
@@ -2548,6 +2606,17 @@ fn translate_size(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, 
     if !opts.groups.contains(&Group::Layout) || flex_grows(decls) {
         fixed_px = (None, None);
     }
+    // A UISizeConstraint on a ScrollingFrame caps its AutomaticCanvasSize too (measured in Studio),
+    // so a cap at the window's size leaves nothing to scroll. A scrolling axis is left to the
+    // stretch instead; `math.huge` still lifts a cap from a weaker rule.
+    let (scroll_x, scroll_y) =
+        if opts.groups.contains(&Group::Visibility) { scroll_axes(decls) } else { (false, false) };
+    if scroll_x && fixed_px.0.is_some() {
+        fixed_px.0 = Some(f64::INFINITY);
+    }
+    if scroll_y && fixed_px.1.is_some() {
+        fixed_px.1 = Some(f64::INFINITY);
+    }
     let minw = last(decls, "min-width");
     let minh = last(decls, "min-height");
     let maxw = last(decls, "max-width");
@@ -3463,8 +3532,19 @@ fn is_flex(decls: &[Decl]) -> bool {
     })
 }
 
+/// Whether the element is a flex row whose items should shrink to fit it, as CSS's initial
+/// `flex-shrink: 1` makes them. A column is left out: Roblox shrinks a content-sized item below its
+/// content, where CSS stops at it, and every column that overflows would crush its items. So is a
+/// row that scrolls along the line, whose items the same shrink would squeeze into the window.
+pub fn shrinks_items(decls: &[Decl]) -> bool {
+    let row = last(decls, "flex-direction")
+        .and_then(|d| d.value.as_str())
+        .is_none_or(|s| s.to_ascii_lowercase().starts_with("row"));
+    is_flex(decls) && row && !scroll_axes(decls).0
+}
+
 /// Whether the rule makes its element a flex or grid container.
-fn is_flex_or_grid(decls: &[Decl]) -> bool {
+pub fn is_flex_or_grid(decls: &[Decl]) -> bool {
     is_flex(decls)
         || last(decls, "display").and_then(|d| d.value.as_str()).is_some_and(|s| {
             let s = s.to_ascii_lowercase();
@@ -3726,6 +3806,32 @@ fn parse_overflow(v: &Value, d: &Decl, diag: &mut Diagnostics) -> Option<Overflo
 /// gets AutomaticCanvasSize. CanvasSize is a floor under the automatic size (measured in Studio), and
 /// its `{0, 0}, {2, 0}` default would keep a canvas twice the frame's height, so it's zeroed.
 fn translate_overflow(decls: &[Decl], diag: &mut Diagnostics, out: &mut Translated) {
+    let (x, y) = overflow_axes(decls, diag);
+    if x.is_none() && y.is_none() {
+        return;
+    }
+    let clips = [x, y].iter().any(|a| matches!(a, Some(Overflow::Clip | Overflow::Scroll)));
+    out.set_prop("ClipsDescendants", clips.to_string());
+    let axes = match (x == Some(Overflow::Scroll), y == Some(Overflow::Scroll)) {
+        (true, true) => "XY",
+        (true, false) => "X",
+        (false, true) => "Y",
+        (false, false) => return,
+    };
+    out.set_prop("ScrollingEnabled", "true".to_string());
+    out.set_prop("ScrollingDirection", format!("Enum.ScrollingDirection.{axes}"));
+    out.set_prop("AutomaticCanvasSize", format!("Enum.AutomaticSize.{axes}"));
+    out.set_prop("CanvasSize", "UDim2.new()".to_string());
+}
+
+/// Whether the element scrolls along each axis: `(x, y)`.
+pub fn scroll_axes(decls: &[Decl]) -> (bool, bool) {
+    let (x, y) = overflow_axes(decls, &mut Diagnostics::default());
+    (x == Some(Overflow::Scroll), y == Some(Overflow::Scroll))
+}
+
+/// The effective overflow of each axis: `(x, y)`.
+fn overflow_axes(decls: &[Decl], diag: &mut Diagnostics) -> (Option<Overflow>, Option<Overflow>) {
     let (mut x, mut y) = (None, None);
     for d in decls {
         match strip_vendor_prefix(&d.name) {
@@ -3746,21 +3852,7 @@ fn translate_overflow(decls: &[Decl], diag: &mut Diagnostics, out: &mut Translat
             _ => {}
         }
     }
-    if x.is_none() && y.is_none() {
-        return;
-    }
-    let clips = [x, y].iter().any(|a| matches!(a, Some(Overflow::Clip | Overflow::Scroll)));
-    out.set_prop("ClipsDescendants", clips.to_string());
-    let axes = match (x == Some(Overflow::Scroll), y == Some(Overflow::Scroll)) {
-        (true, true) => "XY",
-        (true, false) => "X",
-        (false, true) => "Y",
-        (false, false) => return,
-    };
-    out.set_prop("ScrollingEnabled", "true".to_string());
-    out.set_prop("ScrollingDirection", format!("Enum.ScrollingDirection.{axes}"));
-    out.set_prop("AutomaticCanvasSize", format!("Enum.AutomaticSize.{axes}"));
-    out.set_prop("CanvasSize", "UDim2.new()".to_string());
+    (x, y)
 }
 
 /// Roblox's own scrollbar thickness, which `scrollbar-width: auto` restores.

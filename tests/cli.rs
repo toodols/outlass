@@ -1301,6 +1301,47 @@ fn flex_items_stretch_by_default_but_sized_axes_keep_their_size() {
 }
 
 #[test]
+fn a_scrolling_axis_is_never_capped_at_the_window() {
+    // A UISizeConstraint caps a ScrollingFrame's canvas too, so a cap at its own height would leave
+    // nothing to scroll. The other axis keeps its cap.
+    let (out, _) = compile(
+        ".log { width: 300px; height: 100px; overflow-y: auto; } \
+         .hug { width: 300px; height: fit-content; overflow-y: auto; } .hug.fixed { height: 100px; } \
+         .box { width: 300px; height: 100px; } .box.scrolls { overflow: auto; }",
+        &["--approx"],
+    );
+    assert!(rule_of(&out, ".log::UISizeConstraint").contains("MaxSize = Vector2.new(300, math.huge)"), "{out}");
+    // The scrolling comes from a weaker rule.
+    assert!(rule_of(&out, ".hug.fixed::UISizeConstraint").contains("MaxSize = Vector2.new(300, math.huge)"), "{out}");
+    // Scrolling lifts a weaker rule's cap.
+    assert!(rule_of(&out, ".box::UISizeConstraint").contains("MaxSize = Vector2.new(300, 100)"), "{out}");
+    assert!(
+        rule_of(&out, ".box.scrolls::UISizeConstraint").contains("MaxSize = Vector2.new(math.huge, math.huge)"),
+        "{out}"
+    );
+}
+
+#[test]
+fn flex_rows_let_their_items_shrink_like_css() {
+    let (out, _) = compile(
+        ".row { display: flex; } .row.down { flex-direction: column; } .col { display: flex; flex-direction: column; } \
+         .strip { display: flex; overflow-x: auto; } .item { flex: none; } \
+         @media (pointer: coarse) { .touch { display: flex; } }",
+        &["--approx"],
+    );
+    // Below every author rule, so an item's own `flex` wins.
+    let row = rule_of(&out, ".row > GuiObject::UIFlexItem");
+    assert!(row.contains("FlexMode = Enum.UIFlexMode.Shrink") && row.contains("ShrinkRatio = 1"), "{out}");
+    assert!(row.contains(", -"), "a negative priority:\n{out}");
+    assert!(rule_of(&out, ".item::UIFlexItem").contains("FlexMode = Enum.UIFlexMode.None"), "{out}");
+    // A column would crush its content-sized items, and a scrolling row squeeze them into the window.
+    assert!(rule_of(&out, ".row.down > GuiObject::UIFlexItem").contains("FlexMode = Enum.UIFlexMode.None"), "{out}");
+    assert!(!out.contains("\".col > GuiObject::UIFlexItem\""), "{out}");
+    assert!(!out.contains("\".strip > GuiObject::UIFlexItem\""), "{out}");
+    assert!(out.contains("\"@PreferredInputTouch .touch > GuiObject::UIFlexItem\""), "{out}");
+}
+
+#[test]
 fn max_width_and_min_width_combine_with_the_stretch_cap() {
     let (out, _) = compile(".a { width: 300px; height: 20px; max-width: 200px; min-height: 30px; }", &["--approx"]);
     let cap = rule_of(&out, ".a::UISizeConstraint");
@@ -1452,6 +1493,33 @@ fn strict_fails_on_css_that_lays_out_differently() {
         ".card { box-sizing: border-box; width: 100px; height: 20px; padding: 4px; border: 1px solid #fff; }          .card.hot { border: 2px solid red; }",
     );
     assert_eq!(code, 0, "{stderr}");
+
+    // A cap on a scroll container caps its canvas; on anything sized by its content but text, it
+    // doesn't cap the box.
+    let (code, _, stderr) = strict(".log { width: 300px; height: fit-content; max-height: 100px; overflow-y: auto; }");
+    assert_eq!(code, 1);
+    assert!(stderr.contains("`max-height` on a scroll container caps its canvas"), "{stderr}");
+    let (code, _, stderr) = strict(".box { width: 300px; height: fit-content; max-height: 100px; }");
+    assert_eq!(code, 1);
+    assert!(stderr.contains("past its `max-height`"), "{stderr}");
+    for ok in [
+        ".box { width: 300px; height: 200px; max-height: 100px; }",
+        ".box { width: 300px; height: fit-content; max-height: none; }",
+        ".tip { width: fit-content; height: fit-content; max-width: 200px; font-family: Roboto; font-size: 14px; }",
+    ] {
+        let (code, _, stderr) = strict(ok);
+        assert_eq!(code, 0, "{ok}\n{stderr}");
+    }
+
+    // No width fills a block parent in CSS and fits the content in Roblox.
+    let (code, _, stderr) = strict(
+        ".card { width: 200px; height: fit-content; } .card > .caption { height: 20px; } \
+         .row { display: flex; width: 200px; height: fit-content; } .row > .caption { height: 20px; } \
+         .card > .pin { position: absolute; height: 20px; } .card > .sized { width: 50%; height: 20px; }",
+    );
+    assert_eq!(code, 1);
+    assert!(stderr.contains("`.card > .caption` has no `width`"), "{stderr}");
+    assert_eq!(stderr.matches("has no `width`").count(), 1, "{stderr}");
 
     // Grids need a row height.
     let (code, _, stderr) =

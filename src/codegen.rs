@@ -280,6 +280,146 @@ fn check_fractional_grids(sheet: &Sheet, diag: &mut Diagnostics) {
     }
 }
 
+/// The declarations that apply to rule `index`'s elements from weaker rules matching all of them
+/// (`.bar` for `.bar.left`), in cascade order, keeping the properties `keep` names.
+fn weaker_decls(sheet: &Sheet, index: usize, keep: impl Fn(&str) -> bool) -> Vec<Decl> {
+    let rule = &sheet.rules[index];
+    let mut weaker: Vec<(usize, &OutRule)> = sheet
+        .rules
+        .iter()
+        .enumerate()
+        .filter(|(i, other)| {
+            *i != index
+                && !other.query
+                // A rule inside a query only applies when the query does.
+                && (other.parent.is_none() || other.parent == rule.parent)
+                && other.selector.covers(&rule.selector)
+                // Identical selectors: only earlier rules come first in the cascade.
+                && (other.selector != rule.selector || *i < index)
+        })
+        .collect();
+    // Cascade order: lower specificity first, then source order.
+    weaker.sort_by_key(|(i, other)| (other.selector.specificity(), *i));
+    weaker.into_iter().flat_map(|(_, other)| other.decls.iter()).filter(|d| keep(&d.name)).map(to_decl).collect()
+}
+
+fn to_decl(d: &crate::eval::OutDecl) -> Decl {
+    Decl { name: d.name.clone(), value: d.value.clone(), span: Some(d.span.clone()) }
+}
+
+/// CSS flex items shrink to fit their line (`flex-shrink: 1` is the initial value); a Roblox item
+/// only does with a UIFlexItem, whose Shrink mode splits the overflow by size as CSS does
+/// (measured in Studio). A flex row gives its children one through `> GuiObject::UIFlexItem`,
+/// below every author rule: an item's own `flex`/`flex-grow`/`flex-shrink` override it property by
+/// property, and so keep the shrink unless they set one. A rule that turns a weaker rule's row
+/// into something else turns the shrink back off.
+fn flex_shrink_defaults(
+    sheet: &Sheet,
+    priorities: &HashMap<(usize, bool), Option<f64>>,
+    cascade: Cascade,
+    lowest: f64,
+) -> Vec<RobloxRule> {
+    const NAMES: &[&str] = &["display", "flex-direction", "overflow", "overflow-x", "overflow-y"];
+    let top = priorities.values().filter_map(|p| *p).fold(0.0, f64::max);
+    let mut out = Vec::new();
+    for (idx, rule) in sheet.rules.iter().enumerate() {
+        if rule.query || rule.selector.0.is_empty() || !rule.decls.iter().any(|d| NAMES.contains(&d.name.as_str())) {
+            continue;
+        }
+        let weaker = weaker_decls(sheet, idx, |n| NAMES.contains(&n));
+        let mut all = weaker.clone();
+        all.extend(rule.decls.iter().filter(|d| NAMES.contains(&d.name.as_str())).map(to_decl));
+        let props = if approx::shrinks_items(&all) {
+            vec![
+                ("FlexMode".to_string(), "Enum.UIFlexMode.Shrink".to_string()),
+                ("ShrinkRatio".to_string(), "1".to_string()),
+            ]
+        } else if approx::shrinks_items(&weaker) {
+            vec![
+                ("FlexMode".to_string(), "Enum.UIFlexMode.None".to_string()),
+                ("ShrinkRatio".to_string(), "0".to_string()),
+            ]
+        } else {
+            continue;
+        };
+        // Under the CSS cascade author rules are ranked from 1 up, and the user-agent defaults sit
+        // at 0 (none of them touch a UIFlexItem): these take the same order below 0.
+        let priority = match cascade {
+            Cascade::Css => {
+                priorities.get(&(idx, false)).or(priorities.get(&(idx, true))).copied().flatten().map(|p| p - top - 1.0)
+            }
+            Cascade::None => Some(lowest),
+        };
+        let selector = split_selector_list(&rule.selector.to_roblox(&mut Diagnostics::default(), None))
+            .iter()
+            .map(|s| format!("{s} > GuiObject::UIFlexItem"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let prefixes: Vec<Option<String>> = match rule.parent {
+            Some(container) => sheet.rules[container].queries.iter().map(|q| Some(q.name())).collect(),
+            None => vec![None],
+        };
+        for prefix in prefixes {
+            let selector = match prefix {
+                Some(name) => prefix_selector(&selector, &format!("@{name} ")),
+                None => selector.clone(),
+            };
+            out.push(RobloxRule { selector, priority, props: props.clone(), ..Default::default() });
+        }
+    }
+    out
+}
+
+/// `--strict`: an element with no `width` fills a block parent in CSS, but fits its content in
+/// Roblox. As with percentages, a stylesheet only knows the parent through a child combinator.
+fn check_block_children_without_width(sheet: &Sheet, diag: &mut Diagnostics) {
+    use crate::selector::{Combinator, Part, SelectorList};
+    const NAMES: &[&str] = &["width", "position", "display", "left", "right", "inset"];
+    for (idx, rule) in sheet.rules.iter().enumerate() {
+        if rule.query || !rule.decls.iter().any(|d| is_css_property(&d.name)) {
+            continue;
+        }
+        for complex in &rule.selector.0 {
+            let Some(at) = complex.iter().rposition(|p| matches!(p, Part::Comb(Combinator::Child))) else {
+                continue;
+            };
+            let parent = SelectorList(vec![complex[..at].to_vec()]);
+            let parent_rules: Vec<&OutRule> =
+                sheet.rules.iter().filter(|r| !r.query && r.selector.0.iter().any(|c| *c == parent.0[0])).collect();
+            let parent_display: Vec<Decl> =
+                parent_rules.iter().flat_map(|r| r.decls.iter().filter(|d| d.name == "display").map(to_decl)).collect();
+            if parent_rules.is_empty() || approx::is_flex_or_grid(&parent_display) {
+                continue;
+            }
+            let mut decls = weaker_decls(sheet, idx, |n| NAMES.contains(&n));
+            decls.extend(rule.decls.iter().filter(|d| NAMES.contains(&d.name.as_str())).map(to_decl));
+            let value = |name: &str| {
+                decls
+                    .iter()
+                    .rfind(|d| d.name == name)
+                    .map(|d| d.value.to_css().unwrap_or_default().to_ascii_lowercase())
+            };
+            let sized = value("width").is_some()
+                || value("inset").is_some()
+                || (value("left").is_some() && value("right").is_some());
+            let out_of_flow = value("position").is_some_and(|p| p == "absolute" || p == "fixed");
+            let inline = value("display").is_some_and(|d| d.starts_with("inline") || d == "none");
+            if sized || out_of_flow || inline {
+                continue;
+            }
+            diag.error(
+                format!(
+                    "strict: `{}` has no `width`, so it fills its block parent `{}` in CSS but fits its content in \
+                     Roblox; give it a `width` (`100%` to fill)",
+                    rule.selector.to_css(),
+                    parent.to_css()
+                ),
+                Some(&rule.span),
+            );
+        }
+    }
+}
+
 /// Converts evaluated rules into the Roblox StyleRule tree.
 pub fn lower(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -> (Vec<(String, String)>, Vec<RobloxRule>) {
     let sheet_attributes = attributes(&sheet.tokens, &opts.luau, diag);
@@ -294,6 +434,9 @@ pub fn lower(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -> (V
     }
     if opts.approx.strict && opts.approx.groups.contains(&approx::Group::Layout) {
         check_fractional_grids(sheet, diag);
+    }
+    if opts.approx.strict && opts.approx.groups.contains(&approx::Group::Size) {
+        check_block_children_without_width(sheet, diag);
     }
 
     for (idx, rule) in sheet.rules.iter().enumerate() {
@@ -341,6 +484,9 @@ pub fn lower(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -> (V
         Cascade::Css => 0.0,
         Cascade::None => lowest_priority(&rules).min(0.0) - 1.0,
     };
+    if opts.approx.groups.contains(&approx::Group::Layout) {
+        rules.splice(0..0, flex_shrink_defaults(sheet, &priorities, opts.cascade, lowest));
+    }
     // A fresh GuiObject is 0x0, where a CSS box with no size given takes one from its content.
     // AutomaticSize is a floor rather than a replacement — it never shrinks an element below its
     // Size — and `--approx=size` turns every CSS `width`/`height` into Size *and* an explicit
@@ -694,6 +840,10 @@ const COMPOSITE_GROUPS: &[&[&str]] = &[
         "flex",
         "flex-grow",
         "box-sizing",
+        // a scroll container's own size can't be capped (see translate_size)
+        "overflow",
+        "overflow-x",
+        "overflow-y",
     ],
     // FontFace, and UIPadding, which holds the half-leading of the text's line-height as well as
     // the padding
@@ -782,31 +932,9 @@ fn inherited_decls(sheet: &Sheet, index: usize) -> Vec<Decl> {
     if groups.is_empty() {
         return Vec::new();
     }
-    let mut weaker: Vec<(usize, &OutRule)> = sheet
-        .rules
-        .iter()
-        .enumerate()
-        .filter(|(i, other)| {
-            *i != index
-                && !other.query
-                // A rule inside a query only applies when the query does.
-                && (other.parent.is_none() || other.parent == rule.parent)
-                && other.selector.covers(&rule.selector)
-                // Identical selectors: only earlier rules come first in the cascade.
-                && (other.selector != rule.selector || *i < index)
-        })
-        .collect();
-    // Cascade order: lower specificity first, then source order; the rule's own decls come last.
-    weaker.sort_by_key(|(i, other)| (other.selector.specificity(), *i));
-    weaker
-        .into_iter()
-        .flat_map(|(_, other)| other.decls.iter())
-        .filter(|d| {
-            is_css_property(&d.name)
-                && composite_groups(&d.name).iter().any(|g| groups.iter().any(|x| std::ptr::eq(*x, *g)))
-        })
-        .map(|d| Decl { name: d.name.clone(), value: d.value.clone(), span: Some(d.span.clone()) })
-        .collect()
+    weaker_decls(sheet, index, |name| {
+        is_css_property(name) && composite_groups(name).iter().any(|g| groups.iter().any(|x| std::ptr::eq(*x, *g)))
+    })
 }
 
 /// Keeps only the properties (and pseudo-instance properties and transitions) that `keys` has.
@@ -914,6 +1042,11 @@ fn lower_rule(
             own_only.set_prop("LineHeight", String::new());
             own_only.set_pseudo_prop("UIPadding", "PaddingTop", String::new());
             own_only.set_pseudo_prop("UIPadding", "PaddingBottom", String::new());
+        }
+        // Scrolling lifts the cap that keeps a sized element out of a flex line's stretch:
+        // `.log.scrolls { overflow-y: auto }` needs its canvas to outgrow `.log`'s height.
+        if own.iter().any(|d| d.name.starts_with("overflow")) {
+            own_only.set_pseudo_prop("UISizeConstraint", "MaxSize", String::new());
         }
         // The border's inset is part of every side's padding: `.card.flat { border: none }` gives
         // the room back.
