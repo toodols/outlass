@@ -103,12 +103,15 @@ impl clap::ValueEnum for Group {
 // Public API types
 // ---------------------------------------------------------------------------------------------
 
+#[derive(Clone)]
 pub struct ApproxOptions {
     /// Already expanded (no `All`).
     pub groups: Vec<Group>,
     pub luau: LuauOptions,
     /// Font family asset used when font-weight/font-style are set without font-family.
     pub default_font: String,
+    /// Warn about CSS that compiles to a different layout than a browser gives it (`--strict`).
+    pub strict: bool,
 }
 
 pub struct Decl {
@@ -247,7 +250,13 @@ pub static PROPERTIES: &[PropDoc] = &[
                 sets a background, since CSS scales the background rather than replacing it",
     },
     // text
-    PropDoc { css: "font-size", group: Group::Text, roblox: "TextSize", notes: "" },
+    PropDoc {
+        css: "font-size",
+        group: Group::Text,
+        roblox: "TextSize",
+        notes: "TextSize is a line's height and font-size the em, so with a built-in font-family it's scaled by \
+                the family's line-to-em ratio (13px Roboto Mono is TextSize 17), rounded to whole pixels",
+    },
     PropDoc {
         css: "font-family",
         group: Group::Text,
@@ -264,8 +273,27 @@ pub static PROPERTIES: &[PropDoc] = &[
         notes: "shorthand: [style] [weight] size[/line-height] family",
     },
     PropDoc { css: "text-align", group: Group::Text, roblox: "TextXAlignment", notes: "" },
-    PropDoc { css: "vertical-align", group: Group::Text, roblox: "TextYAlignment", notes: "" },
-    PropDoc { css: "line-height", group: Group::Text, roblox: "LineHeight", notes: "" },
+    PropDoc {
+        css: "vertical-align",
+        group: Group::Text,
+        roblox: "TextYAlignment",
+        notes: "outlass-only: CSS ignores it on a block, so prefer `align-content`",
+    },
+    PropDoc {
+        css: "align-content",
+        group: Group::Text,
+        roblox: "TextYAlignment",
+        notes: "on an element that isn't a flex or grid container, aligns its text vertically, as CSS aligns a \
+                block's content",
+    },
+    PropDoc {
+        css: "line-height",
+        group: Group::Text,
+        roblox: "LineHeight, UIPadding (::UIPadding)",
+        notes: "Roblox spaces only the lines after the first, so with a known font-size the element is also \
+                padded by the half-leading, (line-height x font-size - TextSize) / 2, above and below, as CSS \
+                does. outlass has no inheritance: set it on the text element itself",
+    },
     PropDoc { css: "white-space", group: Group::Text, roblox: "TextWrapped", notes: "" },
     PropDoc { css: "text-wrap", group: Group::Text, roblox: "TextWrapped", notes: "" },
     PropDoc { css: "text-overflow", group: Group::Text, roblox: "TextTruncate", notes: "" },
@@ -285,6 +313,13 @@ pub static PROPERTIES: &[PropDoc] = &[
     },
     PropDoc { css: "-webkit-text-stroke-color", group: Group::Text, roblox: "UIStroke.Color (::UIStroke)", notes: "" },
     // size
+    PropDoc {
+        css: "box-sizing",
+        group: Group::Size,
+        roblox: "(implied)",
+        notes: "Roblox always sizes the border box (padding is inside the Size), so `border-box` is accepted and \
+                `content-box` warns",
+    },
     PropDoc {
         css: "width",
         group: Group::Size,
@@ -337,6 +372,20 @@ pub static PROPERTIES: &[PropDoc] = &[
     },
     PropDoc { css: "z-index", group: Group::Position, roblox: "ZIndex", notes: "" },
     PropDoc {
+        css: "margin",
+        group: Group::Position,
+        roblox: "Position / AnchorPoint / Size",
+        notes: "offsets the element from the edge it's placed by, and shrinks one stretched between opposite \
+                edges; `auto` on both sides centres it, on one side pushes it to the other. Siblings don't move, \
+                and flex and grid containers ignore it (with a warning): use `gap` or the container's padding",
+    },
+    PropDoc { css: "margin-top", group: Group::Position, roblox: "Position / Size", notes: "see `margin`" },
+    PropDoc { css: "margin-right", group: Group::Position, roblox: "Position / Size", notes: "see `margin`" },
+    PropDoc { css: "margin-bottom", group: Group::Position, roblox: "Position / Size", notes: "see `margin`" },
+    PropDoc { css: "margin-left", group: Group::Position, roblox: "Position / Size", notes: "see `margin`" },
+    PropDoc { css: "margin-inline", group: Group::Position, roblox: "Position / Size", notes: "left/right" },
+    PropDoc { css: "margin-block", group: Group::Position, roblox: "Position / Size", notes: "top/bottom" },
+    PropDoc {
         css: "position",
         group: Group::Position,
         roblox: "(implied)",
@@ -384,7 +433,14 @@ pub static PROPERTIES: &[PropDoc] = &[
     },
     PropDoc { css: "flex-direction", group: Group::Layout, roblox: "UIListLayout.FillDirection", notes: "" },
     PropDoc { css: "justify-content", group: Group::Layout, roblox: "UIListLayout/UIGridLayout alignment", notes: "" },
-    PropDoc { css: "align-items", group: Group::Layout, roblox: "UIListLayout alignment", notes: "" },
+    PropDoc {
+        css: "align-items",
+        group: Group::Layout,
+        roblox: "UIListLayout alignment / ItemLineAlignment",
+        notes: "defaults to `stretch` in a flex container, as in CSS. Roblox stretches items to the largest item \
+                on the line rather than to the container, and stretches explicitly sized items too, so outlass \
+                keeps a px `width`/`height` out of the stretch with a UISizeConstraint",
+    },
     PropDoc { css: "gap", group: Group::Layout, roblox: "UIListLayout.Padding / UIGridLayout.CellPadding", notes: "" },
     PropDoc {
         css: "row-gap",
@@ -429,7 +485,13 @@ pub static PROPERTIES: &[PropDoc] = &[
         notes: "`dense` packing has no equivalent",
     },
     PropDoc { css: "flex-wrap", group: Group::Layout, roblox: "UIListLayout.Wraps", notes: "" },
-    PropDoc { css: "flex-grow", group: Group::Layout, roblox: "UIFlexItem (::UIFlexItem)", notes: "" },
+    PropDoc {
+        css: "flex-grow",
+        group: Group::Layout,
+        roblox: "UIFlexItem (::UIFlexItem)",
+        notes: "an item that grows with no width starts from 0 (like `flex: 1`) rather than its content, which \
+                a percentage-sized descendant would inflate; this assumes a row, so set a width in a column",
+    },
     PropDoc { css: "flex-shrink", group: Group::Layout, roblox: "UIFlexItem (::UIFlexItem)", notes: "" },
     PropDoc { css: "flex", group: Group::Layout, roblox: "UIFlexItem (::UIFlexItem)", notes: "basis is ignored" },
     PropDoc { css: "align-self", group: Group::Layout, roblox: "UIFlexItem (::UIFlexItem)", notes: "" },
@@ -508,8 +570,6 @@ pub fn lookup(css: &str) -> Option<&'static PropDoc> {
 /// all (regardless of `--approx`).
 fn unknown_hint(css: &str) -> Option<&'static str> {
     match strip_vendor_prefix(css) {
-        "margin" | "margin-top" | "margin-right" | "margin-bottom" | "margin-left" | "margin-inline"
-        | "margin-block" => Some("use padding on the parent or gap"),
         "text-decoration" | "text-decoration-line" => Some("use RichText <u>/<s> tags"),
         "text-transform" => Some("transform the text itself, or wrap it in RichText <uc>/<sc> tags"),
         "text-shadow" | "box-shadow" => Some("use a UIStroke or a shadow ImageLabel"),
@@ -528,6 +588,9 @@ fn unknown_hint(css: &str) -> Option<&'static str> {
 pub fn translate(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics) -> Translated {
     let mut out = Translated::default();
     warn_disabled_and_unknown(decls, opts, diag);
+    if opts.strict {
+        warn_layout_differences(decls, opts, diag);
+    }
 
     let opacity_factor = if opts.groups.contains(&Group::Opacity) {
         last(decls, "opacity").and_then(|d| match parse_opacity_value(&d.value) {
@@ -568,6 +631,109 @@ pub fn translate(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics) -
     }
 
     out
+}
+
+/// `--strict`: CSS that compiles, but that Roblox lays out differently from a browser. Each warning
+/// names the CSS that makes the two agree.
+fn warn_layout_differences(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics) {
+    let is = |d: &Decl, word: &str| d.value.as_str().is_some_and(|s| s.eq_ignore_ascii_case(word));
+
+    if opts.groups.contains(&Group::Size) {
+        for name in ["width", "height"] {
+            if let Some(d) = last(decls, name)
+                && is(d, "auto")
+            {
+                diag.error(
+                    format!(
+                        "strict: `{name}: auto` fills the parent in CSS but fits the content in Roblox; write \
+                         `{name}: fit-content`, or a length or percentage"
+                    ),
+                    d.span.as_ref(),
+                );
+            }
+        }
+    }
+
+    if opts.groups.contains(&Group::Text) {
+        let m = text_metrics(decls, opts);
+        if m.size.is_some() && m.family_ratio.is_none() {
+            let d = decls.iter().rev().find(|d| matches!(d.name.as_str(), "font-size" | "font"));
+            diag.error(
+                "strict: Roblox's TextSize is the height of a line and CSS's font-size the em, and outlass only \
+                 knows how the two relate for built-in families, so this text won't match CSS; set a built-in \
+                 `font-family` (here or in a weaker rule)",
+                d.and_then(|d| d.span.as_ref()),
+            );
+        }
+        if let Some(d) = last(decls, "vertical-align") {
+            diag.error(
+                "strict: `vertical-align` doesn't align a block's content in CSS; use `align-content`",
+                d.span.as_ref(),
+            );
+        }
+    }
+
+    if opts.groups.contains(&Group::Size) && opts.groups.contains(&Group::Box) {
+        let pads = decls.iter().any(|d| d.name.starts_with("padding"));
+        let sized = ["width", "height"]
+            .iter()
+            .filter_map(|n| last(decls, n))
+            .find(|d| matches!(axis_length(&d.value, opts), Ok(AxisResult::Value((s, o))) if s != 0.0 || o != 0.0));
+        let border_box = last(decls, "box-sizing").is_some_and(|d| is(d, "border-box"));
+        if pads
+            && !border_box
+            && let Some(d) = sized
+        {
+            diag.error(
+                format!(
+                    "strict: Roblox puts padding inside the `{}`, as `box-sizing: border-box` does, where CSS \
+                     adds it on top; set `box-sizing: border-box`",
+                    d.name
+                ),
+                d.span.as_ref(),
+            );
+        }
+    }
+
+    if opts.groups.contains(&Group::Layout) && is_flex(decls) {
+        let stretches = last(decls, "align-items").is_none_or(|d| is(d, "stretch") || is(d, "normal"));
+        let column = last(decls, "flex-direction")
+            .is_some_and(|d| d.value.as_str().is_some_and(|s| s.to_ascii_lowercase().starts_with("column")));
+        let cross = if column { "width" } else { "height" };
+        let cross_decl = last(decls, cross);
+        let fits = cross_decl.is_some_and(|d| matches!(axis_length(&d.value, opts), Ok(AxisResult::Auto)));
+        // Roblox stretches items to the largest item on the line; CSS stretches them to the
+        // container. The two agree only when the container is itself sized by its largest item: a
+        // row with no height of its own, or a column that is `width: fit-content`.
+        let differs = if column { !fits } else { cross_decl.is_some() && !fits };
+        if stretches && differs {
+            let at = cross_decl.or(last(decls, "align-items")).or(last(decls, "display"));
+            diag.error(
+                format!(
+                    "strict: Roblox stretches flex items to the largest item on the line, not to the container's \
+                     {cross} as CSS does; set `align-items` (and give the items that should fill it \
+                     `{cross}: 100%`), or make the container `{cross}: fit-content`"
+                ),
+                at.and_then(|d| d.span.as_ref()),
+            );
+        }
+    }
+
+    // In CSS, `position: relative` on a container is what anchors its absolutely positioned
+    // children. Roblox's list and grid layouts place every child, `Position` or not, so such a
+    // child would join the flow. outlass positions every element anyway, so the declaration can go.
+    if opts.groups.contains(&Group::Layout)
+        && is_flex_or_grid(decls)
+        && let Some(d) = last(decls, "position")
+        && is(d, "relative")
+    {
+        diag.error(
+            "strict: an absolutely positioned child of a flex or grid container takes part in Roblox's layout; \
+             put the positioned children in a wrapper without `display: flex`/`grid`, and drop \
+             `position: relative` (every Roblox element is positioned already)",
+            d.span.as_ref(),
+        );
+    }
 }
 
 fn warn_disabled_and_unknown(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics) {
@@ -983,6 +1149,19 @@ fn translate_color_opacity(
                 gradient_span.as_ref(),
             );
         }
+        // A UIGradient colours everything its element draws, text included (it's how gradient text
+        // works), and there's no way to keep it to the background. Text over a gradient background
+        // takes on the gradient's colours, which makes it the colour of the background under it.
+        if decls.iter().any(|d| {
+            matches!(strip_vendor_prefix(&d.name), "color" | "text-fill-color" | "font" | "font-family" | "font-size")
+        }) {
+            diag.warn(
+                "a gradient background also tints this element's text (a UIGradient colours everything its \
+                 element draws), which hides the text in the gradient; put the text in a child element over the \
+                 gradient one",
+                gradient_span.as_ref(),
+            );
+        }
         out.set_prop("BackgroundColor3", white(opts));
         have_bg = true;
         bg_alpha = 1.0;
@@ -994,7 +1173,32 @@ fn translate_color_opacity(
         if let Some(t) = transparency_sequence(gradient.as_ref(), mask.as_ref()) {
             out.set_pseudo_prop("UIGradient", "Transparency", t);
         }
-        let rotation = gradient.as_ref().or(mask.as_ref()).map_or(0.0, |g| g.rotation);
+        let px = |name: &str| {
+            last(decls, name).and_then(|d| match axis_length(&d.value, opts) {
+                Ok(AxisResult::Value((s, o))) if s == 0.0 && o > 0.0 => Some(o),
+                _ => None,
+            })
+        };
+        let size = px("width").zip(px("height"));
+        let rotation = match gradient.as_ref().or(mask.as_ref()) {
+            Some(g) => {
+                // Only worth a warning when a mildly non-square element would already look
+                // noticeably different.
+                if size.is_none() && g.shape_divergence() > 10.0 {
+                    diag.warn(
+                        format!(
+                            "a `{}deg` gradient's direction depends on the element's shape: a UIGradient is rotated \
+                             as if its element were square, so without a px `width` and `height` outlass assumes \
+                             one; give it px sizes, or use a right angle or a `to right`-style direction",
+                            luau::number(g.angle.unwrap_or_default())
+                        ),
+                        gradient_span.as_ref(),
+                    );
+                }
+                g.rotation_for(size)
+            }
+            None => 0.0,
+        };
         out.set_pseudo_prop("UIGradient", "Rotation", luau::number(rotation));
     }
 
@@ -1038,6 +1242,39 @@ const MAX_KEYPOINTS: usize = 20;
 struct Gradient {
     stops: Vec<(f64, Color)>,
     rotation: f64,
+    /// The CSS angle, when the gradient gave one (`135deg`) rather than a direction keyword. A CSS
+    /// angle is a real angle on the element, but a UIGradient is rotated as if its element were
+    /// square, so the rotation depends on the element's shape (see `rotation_for`).
+    angle: Option<f64>,
+}
+
+impl Gradient {
+    /// The UIGradient rotation for an element `size` px wide and tall. A UIGradient works in the
+    /// element's normalised space, where a CSS angle A points along (W sin A, -H cos A); on a
+    /// square that is just A - 90. Direction keywords (`to bottom right`) already run corner to
+    /// corner in both, as do right angles, so only other CSS angles need the size.
+    fn rotation_for(&self, size: Option<(f64, f64)>) -> f64 {
+        match (self.angle, size) {
+            (Some(a), Some((w, h))) if w > 0.0 && h > 0.0 => {
+                let a = a.to_radians();
+                let r = (-h * a.cos()).atan2(w * a.sin()).to_degrees();
+                (r * 1e6).round() / 1e6
+            }
+            _ => self.rotation,
+        }
+    }
+
+    /// How far (in degrees) the direction moves when the element is 2:1 or 1:2 instead of square,
+    /// which is what outlass has to assume without a px size. Near a right angle it barely moves;
+    /// at 45 degrees it moves 18.
+    fn shape_divergence(&self) -> f64 {
+        let square = self.rotation_for(Some((1.0, 1.0)));
+        let diff = |r: f64| {
+            let d = (r - square).rem_euclid(360.0);
+            d.min(360.0 - d)
+        };
+        diff(self.rotation_for(Some((2.0, 1.0)))).max(diff(self.rotation_for(Some((1.0, 2.0)))))
+    }
 }
 
 impl Gradient {
@@ -1318,10 +1555,12 @@ fn parse_linear_gradient(v: &Value, diag: &mut Diagnostics, span: Option<&Span>)
         return None;
     }
     let mut angle_deg = 180.0; // default "to bottom"
+    let mut css_angle: Option<f64> = None;
     let mut idx = 0;
     match &args[0] {
         Value::Number(n) => {
             angle_deg = n.value_in("deg").unwrap_or(n.value);
+            css_angle = Some(angle_deg);
             idx = 1;
         }
         Value::List { items: parts, sep: ListSep::Space, .. }
@@ -1375,7 +1614,7 @@ fn parse_linear_gradient(v: &Value, diag: &mut Diagnostics, span: Option<&Span>)
     if rotation <= -180.0 {
         rotation += 360.0;
     }
-    Some(Gradient { stops, rotation })
+    Some(Gradient { stops, rotation, angle: css_angle })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1492,6 +1731,64 @@ const ROBLOX_FONT_FAMILIES: &[&str] = &[
 ];
 
 const FAMILIES_PREFIX: &str = "rbxasset://fonts/families/";
+
+/// Each built-in family's line height over its em size, `(ascent + descent) / unitsPerEm` from the
+/// regular face's hhea table. Roblox's TextSize is the height of that line, not the em that CSS's
+/// `font-size` names (measured in Studio 2026-09: Source Sans Pro at TextSize 100 has an 80px em),
+/// so a CSS font size becomes `TextSize = font-size x ratio`. Browsers use the same metrics for
+/// `line-height: normal`, which therefore matches too. The Legacy families size text differently
+/// and aren't listed, nor are those whose font files Studio doesn't ship (GothamSSm, Arial).
+const FAMILY_LINE_RATIOS: &[(&str, f64)] = &[
+    ("AccanthisADFStd", 1.168),
+    ("AmaticSC", 1.261),
+    ("Arimo", 1.1172),
+    ("Balthazar", 1.018),
+    ("Bangers", 1.064),
+    ("BuilderExtended", 1.26),
+    ("BuilderMono", 1.26),
+    ("BuilderSans", 1.26),
+    ("ComicNeueAngular", 1.209),
+    ("Creepster", 1.1689),
+    ("DenkOne", 1.25),
+    ("Fondamento", 1.3838),
+    ("FredokaOne", 1.21),
+    ("GrenzeGotisch", 1.48),
+    ("Guru", 1.1846),
+    ("HighwayGothic", 1.107),
+    ("Inconsolata", 1.049),
+    ("IndieFlower", 1.459),
+    ("JosefinSans", 1.0),
+    ("Jura", 1.183),
+    ("Kalam", 1.594),
+    ("LuckiestGuy", 1.0),
+    ("Merriweather", 1.257),
+    ("Michroma", 1.4219),
+    ("Montserrat", 1.219),
+    ("Nunito", 1.364),
+    ("Oswald", 1.482),
+    ("PatrickHand", 1.354),
+    ("PermanentMarker", 1.4268),
+    ("PressStart2P", 1.0244),
+    ("Roboto", 1.1719),
+    ("RobotoCondensed", 1.1719),
+    ("RobotoMono", 1.3188),
+    ("RomanAntique", 1.049),
+    ("Sarpanch", 1.4),
+    ("SourceSansPro", 1.257),
+    ("SpecialElite", 1.0),
+    ("TitilliumWeb", 1.521),
+    ("Ubuntu", 1.121),
+    ("Zekton", 1.2),
+];
+
+/// The line-height-to-em ratio of a resolved font asset, when it's a built-in family outlass knows.
+fn family_line_ratio(asset: &str) -> Option<f64> {
+    let stem = asset.strip_prefix(FAMILIES_PREFIX)?.strip_suffix(".json")?;
+    FAMILY_LINE_RATIOS.iter().find(|(f, _)| f.eq_ignore_ascii_case(stem)).map(|(_, r)| *r)
+}
+
+/// Roblox's largest TextSize.
+const MAX_TEXT_SIZE: f64 = 100.0;
 
 /// A family name as Roblox files it: `Source Sans Pro` -> `SourceSansPro`, matched ignoring case.
 fn builtin_family(name: &str) -> Option<&'static str> {
@@ -1688,6 +1985,93 @@ fn parse_font_shorthand(
     Ok((weight, style, family, size, line_height))
 }
 
+/// A rule's effective font size (px), line height and family, in cascade order.
+struct TextMetrics {
+    size: Option<f64>,
+    /// As a multiple of the font size; `None` for `normal` (or unknown).
+    line_height: Option<f64>,
+    /// The family's line-height-to-em ratio (see FAMILY_LINE_RATIOS); `None` when it isn't known.
+    family_ratio: Option<f64>,
+}
+
+impl TextMetrics {
+    /// The TextSize that draws `font-size` at the size a browser does. Roblox floors TextSize to
+    /// whole pixels, so it's rounded here, and it tops out at 100.
+    fn text_size(&self) -> Option<f64> {
+        Some((self.size? * self.family_ratio.unwrap_or(1.0)).round().min(MAX_TEXT_SIZE))
+    }
+
+    /// The height of one CSS line box, in px.
+    fn line_px(&self) -> Option<f64> {
+        Some(self.line_height? * self.size?)
+    }
+}
+
+fn text_metrics(decls: &[Decl], opts: &ApproxOptions) -> TextMetrics {
+    enum LineHeight {
+        Ratio(f64),
+        /// Resolved against the final font size.
+        Px(f64),
+        Normal,
+    }
+    let mut size = None;
+    let mut line_height = None;
+    let mut family: Option<String> = None;
+    // A weight or style without a family uses the default font (see translate_text).
+    let mut any_font = false;
+    for d in decls {
+        match strip_vendor_prefix(&d.name) {
+            "font-size" => size = font_size_value(&d.value, opts).ok().or(size),
+            "font-family" => {
+                let families = family_texts(&d.value);
+                if !families.is_empty() {
+                    family = Some(resolve_families(&families, opts, &mut Diagnostics::default(), None));
+                }
+            }
+            "font-weight" | "font-style" => any_font = true,
+            "font" => {
+                if let Ok((_, _, fam, sz, lh)) = parse_font_shorthand(&d.value, opts, &mut Diagnostics::default(), None)
+                {
+                    size = sz.or(size);
+                    family = fam.or(family);
+                    any_font = true;
+                    // The shorthand resets an unstated line-height to `normal`.
+                    line_height = Some(lh.map_or(LineHeight::Normal, LineHeight::Ratio));
+                }
+            }
+            "line-height" => {
+                line_height = Some(match &d.value {
+                    Value::Number(n) if n.is_unitless() => LineHeight::Ratio(n.value),
+                    Value::Number(n) if n.has_unit("%") => LineHeight::Ratio(n.value / 100.0),
+                    Value::Number(n) => length_px(n, &opts.luau).map_or(LineHeight::Normal, LineHeight::Px),
+                    _ => LineHeight::Normal,
+                })
+            }
+            _ => {}
+        }
+    }
+    let ratio = match line_height {
+        Some(LineHeight::Ratio(r)) => Some(r),
+        Some(LineHeight::Px(px)) => size.filter(|s| *s > 0.0).map(|s| px / s),
+        _ => None,
+    };
+    let family = family.or_else(|| any_font.then(|| opts.default_font.clone()));
+    TextMetrics { size, line_height: ratio, family_ratio: family.as_deref().and_then(family_line_ratio) }
+}
+
+/// CSS centres every line in a box `line-height` tall. Roblox makes the first line exactly
+/// TextSize tall and applies LineHeight only to the lines after it, so a CSS text box is taller by
+/// half the leading above and below: `(line-height x font-size - TextSize) / 2` each. Returns the
+/// (top, bottom) padding for that, when both are known. Roblox rounds padding to whole pixels, so
+/// the leading is split into whole pixels that add up to it (a -3px leading as -1.5 each would
+/// lose a pixel).
+fn half_leading(decls: &[Decl], opts: &ApproxOptions) -> Option<(f64, f64)> {
+    let m = text_metrics(decls, opts);
+    let leading = (m.line_px()? - m.text_size()?).round();
+    let top = (leading / 2.0).floor();
+    (leading != 0.0).then_some((top, leading - top))
+}
+
 fn translate_text(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, out: &mut Translated) {
     let mut weight: Option<&'static str> = None;
     let mut style: Option<&'static str> = None;
@@ -1700,10 +2084,7 @@ fn translate_text(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, 
     for d in decls {
         match strip_vendor_prefix(&d.name) {
             "font-size" => match font_size_value(&d.value, opts) {
-                Ok(px) => {
-                    out.set_prop("TextSize", luau::number(px));
-                    font_size_px = Some(px);
-                }
+                Ok(px) => font_size_px = Some(px),
                 Err(e) => diag.warn(format!("`font-size`: {e} (ignored)"), d.span.as_ref()),
             },
             "font-family" => {
@@ -1730,7 +2111,8 @@ fn translate_text(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, 
                 Err(e) => diag.warn(format!("`font-style`: {e} (ignored)"), d.span.as_ref()),
             },
             "font" => match parse_font_shorthand(&d.value, opts, diag, d.span.as_ref()) {
-                Ok((w, s, fam, sz, lh)) => {
+                // The size and line-height become TextSize and LineHeight after the loop.
+                Ok((w, s, fam, sz, _)) => {
                     if let Some(w) = w {
                         weight = Some(w);
                     }
@@ -1740,12 +2122,8 @@ fn translate_text(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, 
                     if let Some(fam) = fam {
                         family = Some(fam);
                     }
-                    if let Some(sz) = sz {
-                        out.set_prop("TextSize", luau::number(sz));
-                        font_size_px = Some(sz);
-                    }
-                    if let Some(lh) = lh {
-                        out.set_prop("LineHeight", luau::number(lh));
+                    if sz.is_some() {
+                        font_size_px = sz;
                     }
                     have_font = true;
                 }
@@ -1784,13 +2162,34 @@ fn translate_text(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, 
                     }
                 }
             }
+            // A block's `align-content` aligns its content vertically; a flex or grid container's
+            // aligns its lines, which Roblox has no counterpart for.
+            "align-content" => {
+                if is_flex_or_grid(decls) {
+                    diag.warn(
+                        "`align-content` on a flex or grid container has no Roblox equivalent (ignored)",
+                        d.span.as_ref(),
+                    );
+                } else if let Some(s) = d.value.as_str() {
+                    let e = match s.to_ascii_lowercase().as_str() {
+                        "start" | "flex-start" | "normal" => Some("Top"),
+                        "center" => Some("Center"),
+                        "end" | "flex-end" => Some("Bottom"),
+                        _ => None,
+                    };
+                    match e {
+                        Some(e) => out.set_prop("TextYAlignment", format!("Enum.TextYAlignment.{e}")),
+                        None => diag.warn(format!("unsupported `align-content: {s}` (ignored)"), d.span.as_ref()),
+                    }
+                }
+            }
+            // Converted after the loop (see text_metrics); only the errors are reported here.
             "line-height" => match &d.value {
-                Value::Number(n) if n.is_unitless() => out.set_prop("LineHeight", luau::number(n.value)),
-                Value::Number(n) if n.has_unit("%") => out.set_prop("LineHeight", luau::number(n.value / 100.0)),
+                Value::Number(n) if n.is_unitless() || n.has_unit("%") => {}
                 Value::Number(n) => {
                     let px = length_px(n, &opts.luau);
-                    match (px, font_size_px) {
-                        (Some(px), Some(fs)) if fs > 0.0 => out.set_prop("LineHeight", luau::number(px / fs)),
+                    match (px, last(decls, "font-size").or(last(decls, "font")).and(font_size_px)) {
+                        (Some(_), Some(fs)) if fs > 0.0 => {}
                         _ => diag.warn(
                             format!(
                                 "`line-height: {}` needs a known font-size to convert to a ratio (ignored)",
@@ -1867,6 +2266,41 @@ fn translate_text(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, 
 
     if stroke_present {
         text_stroke(&stroke, decls, opts, diag, out);
+    }
+
+    // TextSize is a line's height and CSS's font-size the em (see FAMILY_LINE_RATIOS). LineHeight
+    // then spaces each following line one CSS line box apart; the first line's half-leading is
+    // padding (see half_leading).
+    let metrics = text_metrics(decls, opts);
+    if let Some(size) = metrics.text_size() {
+        if metrics.size.zip(metrics.family_ratio).is_some_and(|(s, r)| s * r > MAX_TEXT_SIZE + 0.5)
+            && let Some(d) = decls.iter().rev().find(|d| d.name == "font-size" || d.name == "font")
+        {
+            diag.warn(
+                format!(
+                    "this font size needs a TextSize above Roblox's maximum of {MAX_TEXT_SIZE}; using {MAX_TEXT_SIZE}"
+                ),
+                d.span.as_ref(),
+            );
+        }
+        out.set_prop("TextSize", luau::number(size));
+    }
+    let line_height = match (metrics.line_px(), metrics.text_size()) {
+        (Some(px), Some(size)) if size > 0.0 => Some(px / size),
+        // Without a font size, a ratio is all there is.
+        _ => metrics.line_height,
+    };
+    if let Some(lh) = line_height {
+        // Roblox clamps LineHeight to 3 (measured in Studio 2026-09).
+        if lh > 3.0
+            && let Some(d) = decls.iter().rev().find(|d| d.name == "line-height" || d.name == "font")
+        {
+            diag.warn(
+                "this line-height spaces lines more than Roblox's LineHeight allows (3x the TextSize); using 3",
+                d.span.as_ref(),
+            );
+        }
+        out.set_prop("LineHeight", luau::number(lh.min(3.0)));
     }
 
     if have_font {
@@ -2004,31 +2438,50 @@ fn min_length_px(d: Option<&Decl>, opts: &ApproxOptions, diag: &mut Diagnostics)
 }
 
 fn translate_size(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, out: &mut Translated) {
-    let w = last(decls, "width");
-    let h = last(decls, "height");
     let (stretch_x, stretch_y) = stretched_size(decls, opts);
+    // A flex item that grows but has no width starts from its content in CSS and grows from there.
+    // Sized by its content in Roblox, it would feed back through any percentage-sized descendant
+    // (a `width: 100%` bar makes the item as wide as the line, which wraps every item onto its
+    // own). So it starts from 0 instead, as CSS's `flex: 1` does, and takes its width from its
+    // share of the line. That assumes a row, where growing items without a width belong; an item
+    // that grows down a column should set its own width.
+    let grow_basis = opts.groups.contains(&Group::Layout)
+        && flex_grows(decls)
+        && last(decls, "width").is_none()
+        && stretch_x.is_none();
+    let zero_width = Decl { name: "width".to_string(), value: Value::num_unit(0.0, "px"), span: None };
+    let w = if grow_basis { Some(&zero_width) } else { last(decls, "width") };
+    let h = last(decls, "height");
+    // Axes sized in px, which a stretching flex line must leave alone (see below).
+    let mut fixed_px: (Option<f64>, Option<f64>) = (None, None);
+    if let Some(d) = last(decls, "box-sizing")
+        && d.value.as_str().is_some_and(|s| s.eq_ignore_ascii_case("content-box"))
+    {
+        diag.warn(
+            "`box-sizing: content-box` isn't supported: Roblox's Size always includes the padding (ignored)",
+            d.span.as_ref(),
+        );
+    }
     let fits = |d: Option<&Decl>| d.is_some_and(|d| matches!(axis_length(&d.value, opts), Ok(AxisResult::Auto)));
     let sized = |d: Option<&Decl>, stretch: Option<(f64, f64)>| stretch.is_some() || (d.is_some() && !fits(d));
     if (fits(w) || fits(h)) && !sized(w, stretch_x) && !sized(h, stretch_y) {
-        // Only `fit-content`/`auto` axes: that's AutomaticSize alone. No length is given, so Size is
-        // left to other rules and scripts (CSS `width: fit-content` doesn't touch the height either).
-        let axes = match (fits(w), fits(h)) {
-            (true, true) => "XY",
-            (true, false) => "X",
-            _ => "Y",
-        };
-        out.set_prop("AutomaticSize", format!("Enum.AutomaticSize.{axes}"));
+        // Only `fit-content`/`auto` axes, and no length for either axis anywhere in the cascade:
+        // the element is sized by its content on both. AutomaticSize only ever grows an element
+        // past its Size, so the Size is zeroed too, or a weaker rule's size would stay as a floor.
+        out.set_prop("Size", luau::udim2(0.0, 0.0, 0.0, 0.0));
+        out.set_prop("AutomaticSize", "Enum.AutomaticSize.XY".to_string());
     } else if w.is_some() || h.is_some() || stretch_x.is_some() || stretch_y.is_some() {
         let x_given = w.is_some() || stretch_x.is_some();
         let y_given = h.is_some() || stretch_y.is_some();
         if let (Some(given), None) | (None, Some(given)) = (w, h)
             && x_given != y_given
+            && given.span.is_some()
         {
             let missing = if given.name == "width" { "height" } else { "width" };
             diag.warn(
                 format!(
                     "only `{}` is set, but Roblox's Size covers both axes: {missing} becomes automatic here and \
-                     overrides any {missing} from other rules (set `{missing}` too, or `{missing}: auto` to silence this)",
+                     overrides any {missing} from other rules (set `{missing}` too, e.g. `{missing}: fit-content`)",
                     given.name
                 ),
                 given.span.as_ref(),
@@ -2045,6 +2498,7 @@ fn translate_size(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, 
                 Ok(AxisResult::Value((s, o))) => {
                     xs = s;
                     xo = o;
+                    fixed_px.0 = (s == 0.0 && o > 0.0).then_some(o);
                 }
                 Ok(AxisResult::Auto) => auto_x = true,
                 Err(e) => diag.warn(format!("`width`: {e} (ignored)"), d.span.as_ref()),
@@ -2062,6 +2516,7 @@ fn translate_size(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, 
                 Ok(AxisResult::Value((s, o))) => {
                     ys = s;
                     yo = o;
+                    fixed_px.1 = (s == 0.0 && o > 0.0).then_some(o);
                 }
                 Ok(AxisResult::Auto) => auto_y = true,
                 Err(e) => diag.warn(format!("`height`: {e} (ignored)"), d.span.as_ref()),
@@ -2086,16 +2541,25 @@ fn translate_size(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, 
         out.set_prop("AutomaticSize", format!("Enum.AutomaticSize.{automatic}"));
     }
 
+    // A stretching flex line (the CSS default) stretches only items whose cross size is `auto`,
+    // but Roblox's ItemLineAlignment.Stretch stretches explicitly sized items too. A MaxSize at the
+    // element's own size keeps it out of the stretch without changing anything else, unless the
+    // item grows along the line, which the cap would stop.
+    if !opts.groups.contains(&Group::Layout) || flex_grows(decls) {
+        fixed_px = (None, None);
+    }
     let minw = last(decls, "min-width");
     let minh = last(decls, "min-height");
     let maxw = last(decls, "max-width");
     let maxh = last(decls, "max-height");
-    if minw.is_some() || minh.is_some() || maxw.is_some() || maxh.is_some() {
+    if minw.is_some() || minh.is_some() || maxw.is_some() || maxh.is_some() || fixed_px != (None, None) {
         let minw_v = min_length_px(minw, opts, diag);
         let minh_v = min_length_px(minh, opts, diag);
-        let maxw_v = max_length_px(maxw, opts, diag);
-        let maxh_v = max_length_px(maxh, opts, diag);
-        out.set_pseudo_prop("UISizeConstraint", "MinSize", luau::vector2(minw_v, minh_v));
+        let maxw_v = max_length_px(maxw, opts, diag).min(fixed_px.0.unwrap_or(f64::INFINITY)).max(minw_v);
+        let maxh_v = max_length_px(maxh, opts, diag).min(fixed_px.1.unwrap_or(f64::INFINITY)).max(minh_v);
+        if minw.is_some() || minh.is_some() {
+            out.set_pseudo_prop("UISizeConstraint", "MinSize", luau::vector2(minw_v, minh_v));
+        }
         out.set_pseudo_prop("UISizeConstraint", "MaxSize", luau::vector2(maxw_v, maxh_v));
     }
 
@@ -2163,6 +2627,68 @@ fn edges(decls: &[Decl]) -> Edges {
 /// A `(scale, offset)` length pair, as Roblox's UDim stores one.
 type Length = (f64, f64);
 
+/// One side of a `margin`.
+#[derive(Clone, Copy, PartialEq)]
+enum Margin {
+    Length(Length),
+    Auto,
+}
+
+impl Margin {
+    /// The length it takes up when it isn't absorbing free space (CSS resolves `auto` to 0 then).
+    fn length(m: Option<Margin>) -> Length {
+        match m {
+            Some(Margin::Length(l)) => l,
+            _ => (0.0, 0.0),
+        }
+    }
+
+    fn is_auto(m: Option<Margin>) -> bool {
+        m == Some(Margin::Auto)
+    }
+}
+
+/// The effective margins (top, right, bottom, left), from the shorthand and longhands in source order.
+fn margins(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics) -> [Option<Margin>; 4] {
+    let mut sides: [Option<Margin>; 4] = [None; 4];
+    let mut side = |v: &Value, d: &Decl| -> Option<Margin> {
+        if v.as_str().is_some_and(|s| s.eq_ignore_ascii_case("auto")) {
+            return Some(Margin::Auto);
+        }
+        match length_value(v, opts) {
+            Ok(l) => Some(Margin::Length(l)),
+            Err(e) => {
+                diag.warn(format!("`{}`: {e} (ignored)", d.name), d.span.as_ref());
+                None
+            }
+        }
+    };
+    for d in decls {
+        match d.name.as_str() {
+            "margin" => {
+                let [t, r, b, l] = four_sides(&d.value);
+                sides = [side(&t, d), side(&r, d), side(&b, d), side(&l, d)];
+            }
+            "margin-top" => sides[0] = side(&d.value, d),
+            "margin-right" => sides[1] = side(&d.value, d),
+            "margin-bottom" => sides[2] = side(&d.value, d),
+            "margin-left" => sides[3] = side(&d.value, d),
+            "margin-inline" => {
+                let (a, b) = two_sides(&d.value);
+                sides[3] = side(&a, d);
+                sides[1] = side(&b, d);
+            }
+            "margin-block" => {
+                let (a, b) = two_sides(&d.value);
+                sides[0] = side(&a, d);
+                sides[2] = side(&b, d);
+            }
+            _ => {}
+        }
+    }
+    sides
+}
+
 /// CSS absolute positioning: with both opposite edges set and no explicit size on that axis, the
 /// element stretches between them. Returns the size for the stretched axes.
 fn stretched_size(decls: &[Decl], opts: &ApproxOptions) -> (Option<Length>, Option<Length>) {
@@ -2170,13 +2696,16 @@ fn stretched_size(decls: &[Decl], opts: &ApproxOptions) -> (Option<Length>, Opti
         return (None, None);
     }
     let e = edges(decls);
-    let between = |a: &Option<Value>, b: &Option<Value>| -> Option<(f64, f64)> {
+    // Margins inset the stretched element further (translate_position reports their errors).
+    let [mt, mr, mb, ml] = margins(decls, opts, &mut Diagnostics::default());
+    let between = |a: &Option<Value>, b: &Option<Value>, ma: Option<Margin>, mb: Option<Margin>| {
         let (a_scale, a_offset) = length_value(a.as_ref()?, opts).ok()?;
         let (b_scale, b_offset) = length_value(b.as_ref()?, opts).ok()?;
-        Some((1.0 - a_scale - b_scale, -a_offset - b_offset))
+        let ((ma_scale, ma_offset), (mb_scale, mb_offset)) = (Margin::length(ma), Margin::length(mb));
+        Some((1.0 - a_scale - b_scale - ma_scale - mb_scale, -a_offset - b_offset - ma_offset - mb_offset))
     };
-    let x = if last(decls, "width").is_none() { between(&e.left, &e.right) } else { None };
-    let y = if last(decls, "height").is_none() { between(&e.top, &e.bottom) } else { None };
+    let x = if last(decls, "width").is_none() { between(&e.left, &e.right, ml, mr) } else { None };
+    let y = if last(decls, "height").is_none() { between(&e.top, &e.bottom, mt, mb) } else { None };
     (x, y)
 }
 
@@ -2231,6 +2760,40 @@ fn translate_position(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnosti
                 have_pos = true;
             }
             Err(e) => diag.warn(format!("`bottom`: {e} (ignored)"), last_span.as_ref()),
+        }
+    }
+
+    // Margins. GuiObjects are always placed absolutely, so a margin moves the element away from the
+    // edge it's placed by, and `auto` margins share out the space between two placed edges (or the
+    // parent's own edges, when neither is set) as CSS does. They never move siblings.
+    let [mt, mr, mb, ml] = margins(decls, opts, diag);
+    if [mt, mr, mb, ml].iter().any(Option::is_some) {
+        let horizontal = place_with_margins(
+            (left.as_ref(), right.as_ref()),
+            (ml, mr),
+            true,
+            (&mut xs, &mut xo, &mut anchor_x),
+            opts,
+        );
+        // Vertical `auto` margins are 0 in normal flow; they only centre between `top` and `bottom`.
+        let vertical = place_with_margins(
+            (top.as_ref(), bottom.as_ref()),
+            (mt, mb),
+            top.is_some() && bottom.is_some(),
+            (&mut ys, &mut yo, &mut anchor_y),
+            opts,
+        );
+        have_pos |= horizontal || vertical;
+        let placed = left.is_some() || right.is_some() || top.is_some() || bottom.is_some();
+        if !placed && let Some(d) = decls.iter().rev().find(|d| d.name.starts_with("margin")) {
+            diag.warn(
+                format!(
+                    "`{}` moves this element within its parent, but siblings don't make room for it, and a flex or \
+                     grid container ignores it (use `gap` or the container's padding there)",
+                    d.name
+                ),
+                d.span.as_ref(),
+            );
         }
     }
 
@@ -2355,6 +2918,51 @@ fn translate_position(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnosti
     }
 }
 
+/// Applies one axis's margins to a position already computed from its edges (`start`, `end`; left
+/// and right, or top and bottom). `auto_spreads` says whether `auto` margins absorb free space on
+/// this axis. Returns whether the position changed.
+fn place_with_margins(
+    (start, end): (Option<&Value>, Option<&Value>),
+    (m_start, m_end): (Option<Margin>, Option<Margin>),
+    auto_spreads: bool,
+    (scale, offset, anchor): (&mut f64, &mut f64, &mut f64),
+    opts: &ApproxOptions,
+) -> bool {
+    let edge = |v: Option<&Value>| v.and_then(|v| length_value(v, opts).ok());
+    // `auto` margins only share out space when the element isn't pinned to just one edge.
+    let free = auto_spreads && (start.is_some() == end.is_some());
+    let (s_start, o_start) = edge(start).unwrap_or((0.0, 0.0));
+    let (s_end, o_end) = edge(end).unwrap_or((0.0, 0.0));
+    let (ms_start, mo_start) = Margin::length(m_start);
+    let (ms_end, mo_end) = Margin::length(m_end);
+    match (free && Margin::is_auto(m_start), free && Margin::is_auto(m_end)) {
+        // Centred in the space between the two edges.
+        (true, true) => {
+            *scale = (s_start + 1.0 - s_end) / 2.0;
+            *offset = (o_start - o_end) / 2.0;
+            *anchor = 0.5;
+        }
+        // Pushed against the far edge.
+        (true, false) => {
+            *scale = 1.0 - s_end - ms_end;
+            *offset = -o_end - mo_end;
+            *anchor = 1.0;
+        }
+        _ if start.is_none() && end.is_some() => {
+            *scale -= ms_end;
+            *offset -= mo_end;
+        }
+        _ => {
+            if ms_start == 0.0 && mo_start == 0.0 {
+                return false;
+            }
+            *scale += ms_start;
+            *offset += mo_start;
+        }
+    }
+    true
+}
+
 fn apply_translate_component(
     v: &Value,
     offset: &mut f64,
@@ -2399,12 +3007,51 @@ fn parse_border_shorthand(v: &Value) -> (Option<Value>, Option<Value>, Option<Va
     for it in items {
         match &it {
             Value::Number(_) => width = Some(it),
-            Value::Color(_) => color = Some(it),
+            // A `var()` token or a colour function (`rgba(...)` kept as a call) is the colour too.
+            Value::Color(_) | Value::Call { .. } => color = Some(it),
             Value::Str { .. } => style = Some(it),
             _ => {}
         }
     }
     (width, style, color)
+}
+
+/// How far a CSS border pushes the content in, in px. CSS draws a border inside the element's
+/// box (with `box-sizing: border-box`), taking room from the content; a UIStroke in Border mode
+/// is drawn outside the box and takes none. An outline takes no room in either.
+fn border_inset(decls: &[Decl], opts: &ApproxOptions) -> f64 {
+    let mut width: Option<Value> = None;
+    let mut style: Option<Value> = None;
+    let mut present = false;
+    for d in decls {
+        match d.name.as_str() {
+            "border" => {
+                let (w, s, _) = parse_border_shorthand(&d.value);
+                // The shorthand resets what it leaves out, and `border: none` is a bare style.
+                width = w;
+                style = s;
+                present = true;
+            }
+            "border-width" => {
+                width = Some(d.value.clone());
+                present = true;
+            }
+            "border-style" => {
+                style = Some(d.value.clone());
+                present = true;
+            }
+            _ => {}
+        }
+    }
+    let none = style.as_ref().and_then(|s| s.as_str()).is_some_and(|s| {
+        let s = s.to_ascii_lowercase();
+        s == "none" || s == "hidden"
+    });
+    if !present || none {
+        return 0.0;
+    }
+    // A UIStroke is 1px when the border gives no width (see translate_box).
+    width.as_ref().map_or(Some(1.0), |w| px_only(w, &opts.luau).ok()).unwrap_or(0.0)
 }
 
 fn translate_box(
@@ -2460,12 +3107,24 @@ fn translate_box(
         }
     }
     const PADDING_NAMES: [&str; 4] = ["PaddingTop", "PaddingRight", "PaddingBottom", "PaddingLeft"];
+    // The half-leading CSS puts above and below the text (see half_leading) goes on top of the padding,
+    // and so does the border, which CSS draws inside the box and Roblox's UIStroke outside it.
+    let leading = if opts.groups.contains(&Group::Text) { half_leading(decls, opts) } else { None };
+    let inset = border_inset(decls, opts);
     for (i, side) in sides.into_iter().enumerate() {
-        if let Some((v, span)) = side {
-            match length_value(&v, opts) {
-                Ok((s, o)) => out.set_pseudo_prop("UIPadding", PADDING_NAMES[i], luau::udim(s, o)),
+        let extra = inset
+            + match (i, leading) {
+                (0, Some((top, _))) => top,
+                (2, Some((_, bottom))) => bottom,
+                _ => 0.0,
+            };
+        match side {
+            Some((v, span)) => match length_value(&v, opts) {
+                Ok((s, o)) => out.set_pseudo_prop("UIPadding", PADDING_NAMES[i], luau::udim(s, o + extra)),
                 Err(e) => diag.warn(format!("`padding`: {e} (ignored)"), span.as_ref()),
-            }
+            },
+            None if extra != 0.0 => out.set_pseudo_prop("UIPadding", PADDING_NAMES[i], luau::udim(0.0, extra)),
+            None => {}
         }
     }
 
@@ -2637,10 +3296,12 @@ fn apply_justify(s: &str, column: bool, grid: bool, out: &mut Translated, diag: 
 
 fn apply_align_items(s: &str, column: bool, out: &mut Translated, diag: &mut Diagnostics, span: Option<&Span>) {
     let lower = s.to_ascii_lowercase();
-    if lower == "stretch" {
+    if lower == "stretch" || lower == "normal" {
         out.set_pseudo_prop("UIListLayout", "ItemLineAlignment", "Enum.ItemLineAlignment.Stretch".to_string());
         return;
     }
+    // Any other value undoes the stretch a `display: flex` rule gives by default.
+    out.set_pseudo_prop("UIListLayout", "ItemLineAlignment", "Enum.ItemLineAlignment.Automatic".to_string());
     // Roblox has no baseline alignment. Bottom edges line up with the baselines whenever the items
     // share a font size, which is the usual case; taller text then sits a descender too low. In a
     // column the cross axis is horizontal, where CSS itself falls back to `start`.
@@ -2777,10 +3438,13 @@ fn translate_grid(
     }
     for (track, axis_name) in [(columns, "grid-auto-columns"), (rows, "grid-auto-rows")] {
         if track.is_none() {
-            diag.warn(
-                format!("grid cells need a size on both axes; add `{axis_name}` (the Roblox default of 100px is used)"),
-                span,
-            );
+            let message =
+                format!("grid cells need a size on both axes; add `{axis_name}` (the Roblox default of 100px is used)");
+            if opts.strict {
+                diag.error(format!("strict: {message}"), span);
+            } else {
+                diag.warn(message, span);
+            }
         }
         if let Some((_, Track::Auto, s)) = track {
             diag.warn("content-sized grid tracks are approximated as equal shares of the container", s);
@@ -2789,6 +3453,35 @@ fn translate_grid(
     let x = columns.map_or((0.0, 100.0), |(count, track, _)| cell_extent(track, count, column_gap));
     let y = rows.map_or((0.0, 100.0), |(count, track, _)| cell_extent(track, count, row_gap));
     out.set_pseudo_prop("UIGridLayout", "CellSize", luau::udim2(x.0, x.1, y.0, y.1));
+}
+
+/// Whether the rule makes its element a flex container.
+fn is_flex(decls: &[Decl]) -> bool {
+    last(decls, "display").and_then(|d| d.value.as_str()).is_some_and(|s| {
+        let s = s.to_ascii_lowercase();
+        s == "flex" || s == "inline-flex"
+    })
+}
+
+/// Whether the rule makes its element a flex or grid container.
+fn is_flex_or_grid(decls: &[Decl]) -> bool {
+    is_flex(decls)
+        || last(decls, "display").and_then(|d| d.value.as_str()).is_some_and(|s| {
+            let s = s.to_ascii_lowercase();
+            s == "grid" || s == "inline-grid"
+        })
+}
+
+/// Whether the rule lets its element grow along a flex line (past its `width`/`height`).
+fn flex_grows(decls: &[Decl]) -> bool {
+    decls.iter().any(|d| match d.name.as_str() {
+        "flex-grow" => d.value.as_number().is_some_and(|n| n.value > 0.0),
+        "flex" => match d.value.as_str() {
+            Some(s) => s.eq_ignore_ascii_case("auto"),
+            None => space_items(&d.value).first().and_then(|v| v.as_number()).is_some_and(|n| n.value > 0.0),
+        },
+        _ => false,
+    })
 }
 
 fn translate_layout(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, out: &mut Translated) {
@@ -2860,10 +3553,18 @@ fn translate_layout(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics
     {
         apply_justify(s, column_flow, is_grid, out, diag, d.span.as_ref());
     }
-    if let Some(d) = last(decls, "align-items")
-        && let Some(s) = d.value.as_str()
-    {
-        apply_align_items(s, direction_column, out, diag, d.span.as_ref());
+    match last(decls, "align-items") {
+        Some(d) => {
+            if let Some(s) = d.value.as_str() {
+                apply_align_items(s, direction_column, out, diag, d.span.as_ref());
+            }
+        }
+        // CSS flex items stretch across the line unless told otherwise. translate_size keeps
+        // explicitly sized items out of it, as CSS does.
+        None if is_flex(decls) => {
+            out.set_pseudo_prop("UIListLayout", "ItemLineAlignment", "Enum.ItemLineAlignment.Stretch".to_string())
+        }
+        None => {}
     }
 
     let mut rg: Option<Value> = None;
@@ -3549,6 +4250,7 @@ mod tests {
             groups: Group::expand(groups),
             luau: LuauOptions::default(),
             default_font: "rbxasset://fonts/families/SourceSansPro.json".to_string(),
+            strict: false,
         }
     }
 
@@ -3820,12 +4522,12 @@ mod tests {
     #[test]
     fn unknown_property_warns_with_hint() {
         let mut diag = Diagnostics::default();
-        let decls = vec![decl("margin", Value::num_unit(4.0, "px"))];
+        let decls = vec![decl("float", Value::str("left"))];
         let t = translate(&decls, &all_opts(), &mut diag);
         assert!(t.props.is_empty());
         assert_eq!(diag.warning_count(), 1);
-        assert!(diag.items[0].message.contains("margin"));
-        assert!(diag.items[0].message.contains("use padding on the parent or gap"));
+        assert!(diag.items[0].message.contains("float"));
+        assert!(diag.items[0].message.contains("use layout properties instead"));
     }
 
     #[test]

@@ -26,7 +26,7 @@ outlass --help                        # full reference; `outlass properties`, `o
   opacity: 0.9;                        // → Text/Image/GroupTransparency = 0.1
 
   &:hover { BackgroundColor3: lighten(#1f2937, 10%); }  // outranks .card by the CSS cascade
-  > .title { font: bold 20px "GothamSSm"; }
+  > .title { font: bold 20px "Montserrat"; }
 }
 ```
 
@@ -63,7 +63,7 @@ Put it in a ModuleScript and apply it with a `StyleLink` under your `ScreenGui`.
 | nesting, `&`, `&-suffix`, `@extend` | flattened into full selectors, like Sass does |
 | `PascalCase: value` | Roblox property; the value is emitted as Luau |
 | `--Name: value` | `SetAttribute` on the rule (or on the sheet in `:root`/top level); raw text, so use `#{}` |
-| `var(--Name)`, `token(Name)` | token reference `"$Name"` |
+| `var(--Name)`, `token(Name)` | token reference `"$Name"`; in a CSS property, a `:root` token that isn't a colour is compiled in (see below) |
 | the CSS cascade, `!important`, `@priority 10;` | `StyleRule.Priority` (see [The cascade](#the-cascade)) |
 | `Transition: BackgroundColor3 0.2s Quad Out` | `SetPropertyTransitions` (`*`/`all` → `SetDefaultPropertyTransition`) |
 | `@media`, `@container`, `@PreferredInputTouch { ... }` | `@Name` query selectors (see [Queries](#queries)) |
@@ -93,8 +93,21 @@ Like a browser, outlass also has a tiny user-agent stylesheet that sits below ev
 `TextLabel`, `TextButton` and `TextBox` it turns `RichText` on, since CSS text is always markup. With
 `--approx=size` it also sets `AutomaticSize` to `XY` on every GuiObject class, because a fresh Roblox
 element is 0×0 where a CSS box with no size given takes one from its content. Any rule that gives an
-element a `width` and a `height` sets `AutomaticSize` back to `None`, so authored sizes still win. To opt
-out by hand, set `RichText: false` or `AutomaticSize: Enum.AutomaticSize.None` on any rule.
+element a `width` and a `height` sets `AutomaticSize` back to `None`, so authored sizes still win. With
+`--approx=color`, every GuiObject class starts transparent with no border (`BackgroundTransparency = 1`,
+`BorderSizePixel = 0`), as a CSS box does; a rule with a background makes it opaque again. Buttons also
+get `AutoButtonColor = false`, since a browser button only changes on hover or press when a `:hover` or
+`:active` rule says so. With
+`--approx=text`, `TextLabel` and `TextBox` text starts at the top left (`text-align: start`), where Roblox
+centres it; a `TextButton` stays centred, as a browser centres a button's content. To opt out by hand,
+set the property on any rule, e.g. `RichText: false` or `AutomaticSize: Enum.AutomaticSize.None`.
+
+A `var()` in a CSS property is a `"$Name"` reference that Roblox resolves at run time, so a theme can
+change it. That only works for opaque colours, though (a Color3 attribute has no alpha, so a translucent
+colour is compiled in too): a font family, a length or a gradient has to be known when
+outlass compiles it into a `FontFace`, a `UDim` or a `UIGradient`. So `var(--font-body)` or
+`var(--radius)` gets the token's `:root` value compiled in, unless a rule or query redefines the token.
+The attribute is still set, as text when it has no attribute type (a gradient).
 
 ### Sizing an element from its parent
 
@@ -109,9 +122,10 @@ knowing:
 - `AutomaticSize` is a floor, not a replacement: an element keeps the size its rules give it and only
   grows when its content is bigger. Padding counts toward that content.
 
-`align-items: stretch` is not a substitute. Roblox stretches items to the widest item on the line rather
-than to the container, so it evens up siblings but never fills a wider parent. `flex-grow` does fill,
-and the width it produces is definite, so percentages under it resolve normally.
+Flex items stretch across the line by default, but that's not a substitute either. Roblox stretches items
+to the widest item on the line rather than to the container, so it evens up siblings but never fills a
+wider parent. `flex-grow` does fill, and the width it produces is definite, so percentages under it
+resolve normally.
 
 A grid wraps at whatever width its parent offers, so a container narrower than
 `columns x cell + gaps` quietly wraps a column early.
@@ -158,9 +172,9 @@ ignored with a warning that names the flag to enable. Explicit Roblox properties
 | --- | --- | --- |
 | `color` | `color`, `background[-color]`, `background-image`, `background-clip`, `mask-image`, `scrollbar-color` | `TextColor3`, `BackgroundColor3` + transparency from alpha, `::UIGradient` for `linear-gradient()` and `repeating-linear-gradient()` (Color from the background, Transparency from a mask), gradient text via `background-clip: text`, `Image` for `url()`, `ScrollBarImageColor3` (the thumb; Roblox draws no track) |
 | `opacity` | `opacity` | `1 - x` into `GroupTransparency` (a CanvasGroup fades with its children, like CSS), `TextTransparency`, `ImageTransparency`, and `BackgroundTransparency` when a background is known (combined with color alpha) |
-| `text` | `font*`, `text-align`, `vertical-align`, `line-height`, `white-space`, `text-overflow`, `-webkit-text-stroke[-width|-color]`, `content` | `FontFace` (the first family in the list that Roblox has; unknown names warn, `rbxassetid://` uploads pass through), `TextSize`, `TextX/YAlignment`, `LineHeight`, `TextWrapped`, `TextTruncate`, `::UIStroke`, `Text` |
-| `size` | `width`, `height`, `min-*`, `max-*`, `aspect-ratio` | `Size`/`AutomaticSize`, `::UISizeConstraint`, `::UIAspectRatioConstraint` |
-| `position` | `left/top/right/bottom/inset`, `transform`, `z-index` | `Position`, `AnchorPoint`, `Rotation`, `::UIScale`, `ZIndex` |
+| `text` | `font*`, `text-align`, `vertical-align`, `align-content`, `line-height`, `white-space`, `text-overflow`, `-webkit-text-stroke[-width|-color]`, `content` | `FontFace` (the first family in the list that Roblox has; unknown names warn, `rbxassetid://` uploads pass through), `TextSize`, `TextX/YAlignment`, `LineHeight` (+ half-leading `::UIPadding`), `TextWrapped`, `TextTruncate`, `::UIStroke`, `Text` |
+| `size` | `width`, `height`, `min-*`, `max-*`, `aspect-ratio`, `box-sizing` | `Size`/`AutomaticSize`, `::UISizeConstraint`, `::UIAspectRatioConstraint` |
+| `position` | `left/top/right/bottom/inset`, `margin*`, `transform`, `z-index` | `Position`, `AnchorPoint`, `Rotation`, `::UIScale`, `ZIndex` |
 | `box` | `border-radius`, `padding*`, `border*`, `outline*` | `::UICorner`, `::UIPadding`, `::UIStroke` |
 | `layout` | `display`, `flex-*`, `justify-content`, `align-*`, `gap`, `grid-template-*`, `grid-auto-*`, `order` | `::UIListLayout`, `::UIGridLayout` (`FillDirectionMaxCells`, `CellSize`, `CellPadding`), `::UIFlexItem`, `LayoutOrder`, `Visible` |
 | `visibility` | `visibility`, `overflow*`, `scrollbar-width`, `scrollbar-gutter`, `pointer-events`, `appearance` | `Visible`, `ClipsDescendants`, `ScrollingEnabled`/`ScrollingDirection`, `AutomaticCanvasSize` + `CanvasSize` (a scrolling axis scrolls exactly its content, like CSS), `ScrollBarThickness`, `VerticalScrollBarInset`, `Interactable`, `AutoButtonColor` |
@@ -169,6 +183,34 @@ ignored with a warning that names the flag to enable. Explicit Roblox properties
 It follows CSS semantics where Roblox allows:
 - `position: absolute` with `left` and `right` (or `inset: 0`) and no width stretches the element.
 - `translate(-50%, -50%)` centers it.
+- `margin` offsets an element from the edge it's placed by, and insets one stretched between two
+  edges, so `inset: 0; margin: 8px` leaves 8px all round. `margin: 0 auto` centres an element with a
+  width, and `margin-left: auto` pushes it right. Margins never move siblings, and a flex or grid
+  container ignores them, so outside absolute positioning outlass warns: use `gap`, or padding on the
+  container.
+- Flex items stretch across the line by default, as in CSS. Roblox's `Stretch` also stretches items
+  that have an explicit size, which CSS doesn't, so an element with a px `width` or `height` gets a
+  `::UISizeConstraint` at that size to keep it out of the stretch (not when it has `flex-grow`, which the
+  cap would stop). A size set from Luau is not protected this way.
+- Text is the size a browser draws it. CSS's `font-size` is the em, but Roblox's `TextSize` is the
+  height of a whole line (ascent plus descent), so outlass multiplies by the family's line-to-em ratio,
+  read from the font files Studio ships: `font-size: 13px` in Roboto Mono is `TextSize = 17`. That
+  also makes `line-height: normal` match, since browsers use the same metrics. It needs a built-in
+  `font-family` in the cascade; an uploaded or unknown font keeps `TextSize = font-size`. Roblox floors
+  `TextSize` to whole pixels and caps it at 100, and glyph advances are rounded to whole pixels at small
+  sizes, so widths can still differ by a pixel or two.
+- `line-height` spaces lines as CSS does. Roblox makes the first line exactly `TextSize` tall and applies
+  `LineHeight` only between lines, so outlass pads the element by half the leading,
+  `(line-height x font-size - TextSize) / 2`, above and below (in whole pixels). A 20px font at
+  `line-height: 1.5` is 30px tall per line in both. outlass has no inheritance, so set it on the text
+  element itself. Roblox caps `LineHeight` at 3.
+- `fit-content` sizes an element from its content even when a weaker rule gives it a size: the Size is
+  zeroed, since `AutomaticSize` only grows an element past its Size.
+- `align-content: center` centres a block's text vertically, as it does in CSS. `vertical-align` does
+  the same in outlass but nothing to a block in a browser.
+- Padding is always inside the size (`box-sizing: border-box`), since that's how `UIPadding` works.
+- A border takes room inside the box, as in CSS: its width is added to the padding, since a
+  `UIStroke` is drawn outside the element and takes none. An outline takes no room in either.
 - `border: none` also clears Roblox's legacy `BorderSizePixel`.
 - A `background-image` gradient is painted **over** `background-color`, as in CSS, so an opaque
   gradient hides the colour entirely. A UIGradient can't do that — it multiplies `BackgroundColor3`
@@ -200,6 +242,36 @@ colour. That's what lets `.panel.solid { background-color: #123 }` undo a weaker
 `opacity` scales those transparencies rather than replacing them: `.a:hover { opacity: 0.5 }` fades
 the background and border `.a` gives it, and leaves a transparent background transparent. A rule that
 sets `opacity` without any known background leaves `BackgroundTransparency` alone.
+
+### `--strict`
+
+Some CSS compiles fine but lays out differently in Roblox than in a browser, because Roblox has no
+equivalent behaviour. `--strict` makes each case that can be seen from the stylesheet an error: every one
+is reported, then the build fails and nothing is written. Each error names the CSS that makes the two
+agree:
+
+- `width: auto` fills the parent in CSS but fits the content in Roblox: write `fit-content`, a length or
+  a percentage.
+- Text with a `font-size` but no built-in `font-family` can't be sized like CSS: set a built-in family.
+- Padding with a `width` or `height` under CSS's default `content-box`, where Roblox puts the padding
+  inside the size: set `box-sizing: border-box`.
+- `vertical-align` doesn't align a block's content in CSS: use `align-content`.
+- A flex container that stretches its items (the CSS default) on an axis it doesn't size by its content:
+  Roblox stretches items to the largest item on the line, CSS to the container. A column that isn't
+  `width: fit-content` and a row with a `height` both count. Set `align-items`, and give the items that
+  should fill the container `100%`.
+- `position: relative` on a flex or grid container, which in CSS anchors absolutely positioned children:
+  Roblox's layouts place every child, so those would join the flow. Move them into a wrapper without a
+  layout, and drop the `position: relative`, which does nothing in Roblox.
+- A percentage size whose selector names a parent sized by its content (`.card > .bar { width: 100% }`
+  when `.card` has no `width`): Roblox resolves it to 0, or inflates the parent. Give the parent a size.
+- A grid without a row (or column) size: Roblox cells are a fixed size, 100px unless given one.
+- `fr` tracks in a grid sized by its content: CSS sizes the tracks from their contents, but Roblox cells
+  are a fraction of the grid's size. Give the grid a `width` (or `height` for `fr` rows).
+
+Regular warnings stay warnings; add `--deny-warnings` to fail on those too. Some differences depend on the
+element tree, which a stylesheet doesn't fully know: a percentage size under a parent that no selector
+names, for instance. Those can only be found by rendering.
 
 `outlass properties` prints the exact mapping and caveats for every property. It's generated from the same
 table the compiler uses. A few approximations are unavoidably lossy. For example, if nothing tells outlass
@@ -255,4 +327,4 @@ outlass functions [FILTER]
 
 Common options: `-o FILE|-`, `-d DIR`, `--merge`, `--approx[=GROUPS]`, `-I DIR`, `-D name=value`,
 `--default-priority N`, `--cascade css|none`, `--color-format rgb|hex|float`, `--rem PX`,
-`--emit luau|css`, `--watch`, `-q`, `--deny-warnings`. See `outlass --help` for everything, with examples.
+`--emit luau|css`, `--watch`, `-q`, `--strict`, `--deny-warnings`. See `outlass --help` for everything, with examples.

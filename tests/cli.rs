@@ -494,7 +494,7 @@ fn properties_group_filter_shows_only_that_group() {
 
 #[test]
 fn properties_unknown_property_is_an_error() {
-    let (code, _stdout, _stderr) = run(&["properties", "margin"], None);
+    let (code, _stdout, _stderr) = run(&["properties", "float"], None);
     assert_eq!(code, 1);
 }
 
@@ -796,7 +796,8 @@ fn transitions_reach_pseudo_instances() {
 #[test]
 fn borders_clear_the_legacy_border() {
     let (out, _) = compile("Frame { border: none; } .card { border: 1px solid #fff; }", &["--approx"]);
-    assert_eq!(out.matches("BorderSizePixel = 0").count(), 2, "{out}");
+    // Both rules, and the user-agent default under every GuiObject (a CSS box has no border).
+    assert_eq!(out.matches("BorderSizePixel = 0").count(), 3, "{out}");
     assert!(out.contains("Enabled = false"), "{out}");
     assert!(out.contains("Enabled = true"), "{out}");
 }
@@ -813,7 +814,7 @@ fn repeating_linear_gradient_is_written_out_stop_by_stop() {
     // Roblox has no repeating gradient, but a UIGradient holds 20 keypoints, which is room for
     // the pattern written out by hand.
     let (out, stderr) = compile(
-        ".stripes { background: repeating-linear-gradient(45deg, #222 0 10%, #444 10% 20%); }",
+        ".stripes { width: 100px; height: 100px; background: repeating-linear-gradient(45deg, #222 0 10%, #444 10% 20%); }",
         &["--approx", "--color-format", "hex"],
     );
     let gradient = &out[out.find("\".stripes::UIGradient\"").unwrap()..];
@@ -1043,12 +1044,17 @@ fn zero_percent_translate_still_sets_the_anchor() {
 }
 
 #[test]
-fn fit_content_alone_only_sets_automatic_size() {
-    let (out, stderr) =
-        compile(".as-x { width: fit-content; } .as-xy { width: fit-content; height: fit-content; }", &["--approx"]);
-    assert!(out.contains("AutomaticSize = Enum.AutomaticSize.X,"), "{out}");
-    assert!(out.contains("AutomaticSize = Enum.AutomaticSize.XY,"), "{out}");
-    assert!(!out.contains("\tSize = UDim2"), "no length given, so Size must be left alone:\n{out}");
+fn fit_content_sizes_from_the_content_even_over_a_weaker_size() {
+    let (out, stderr) = compile(
+        ".as-x { width: fit-content; } .wide { width: 100%; height: 20px; } .row > .wide { width: fit-content; height: fit-content; }",
+        &["--approx"],
+    );
+    // AutomaticSize only grows an element past its Size, so a weaker rule's Size has to be zeroed.
+    for selector in [".as-x", ".row > .wide"] {
+        let rule = rule_of(&out, selector);
+        assert!(rule.contains("Size = UDim2.new(0, 0, 0, 0)"), "{out}");
+        assert!(rule.contains("AutomaticSize = Enum.AutomaticSize.XY"), "{out}");
+    }
     assert!(!stderr.contains("only `width`"), "{stderr}");
 }
 
@@ -1095,7 +1101,7 @@ fn elements_are_content_sized_by_default_and_a_css_size_turns_that_off() {
         "{out}"
     );
     assert!(out.contains("Size = UDim2.new(0, 100, 0, 20),\n\tAutomaticSize = Enum.AutomaticSize.None,"), "{out}");
-    assert!(out.contains("rule(sheet, \".grow\"") && out.contains("AutomaticSize = Enum.AutomaticSize.X,"), "{out}");
+    assert!(rule_of(&out, ".grow").contains("AutomaticSize = Enum.AutomaticSize.XY,"), "{out}");
     // Without the size approximations nothing translates to AutomaticSize, so the default is not
     // overridable and isn't emitted.
     let (out, _) = compile(".chip { Size: UDim2.new(0, 100, 0, 20); }", &[]);
@@ -1250,7 +1256,8 @@ fn unknown_fonts_warn_and_fall_back_like_css() {
     assert!(stderr.contains("`Inter`"), "{stderr}");
     assert!(stderr.contains("using `Source Sans Pro`"), "{stderr}");
     assert!(out.contains("Font.new(\"rbxasset://fonts/families/SourceSansPro.json\", Enum.FontWeight.Bold"), "{out}");
-    assert!(out.contains("TextSize = 20"), "{out}");
+    // Roblox's TextSize is a line's height: 20px x Source Sans Pro's 1.257.
+    assert!(out.contains("TextSize = 25"), "{out}");
 
     // Built-in names in any spacing or case, generic families and uploaded fonts are all fine.
     let (out, stderr) = compile(
@@ -1261,4 +1268,352 @@ fn unknown_fonts_warn_and_fall_back_like_css() {
     assert!(out.contains("rbxasset://fonts/families/BuilderSans.json"), "{out}");
     assert!(out.contains("rbxasset://fonts/families/RobotoMono.json"), "{out}");
     assert!(out.contains("Font.new(\"rbxassetid://123\""), "{out}");
+}
+
+// ---------- 22. layout parity ----------
+
+/// The body of the StyleRule emitted for exactly this selector.
+fn rule_of<'a>(out: &'a str, selector: &str) -> &'a str {
+    let start =
+        out.find(&format!("rule(sheet, \"{selector}\"")).unwrap_or_else(|| panic!("no `{selector}` rule in:\n{out}"));
+    let rest = &out[start..];
+    &rest[..rest.find("\n})").map_or(rest.len(), |i| i + 3)]
+}
+
+#[test]
+fn flex_items_stretch_by_default_but_sized_axes_keep_their_size() {
+    let (out, _) = compile(
+        ".row { display: flex; } .row.mid { align-items: center; } .icon { width: 16px; height: 16px; } \
+         .bar { height: 4px; width: 50%; } .grow { width: 100px; height: 20px; flex: 1; }",
+        &["--approx"],
+    );
+    assert!(
+        rule_of(&out, ".row::UIListLayout").contains("ItemLineAlignment = Enum.ItemLineAlignment.Stretch"),
+        "{out}"
+    );
+    // Any other alignment has to undo the stretch a weaker `display: flex` rule gave.
+    assert!(rule_of(&out, ".row.mid::UIListLayout").contains("ItemLineAlignment = Enum.ItemLineAlignment.Automatic"));
+    // Roblox stretches explicitly sized items too; a MaxSize at their own size keeps them out of it.
+    assert!(rule_of(&out, ".icon::UISizeConstraint").contains("MaxSize = Vector2.new(16, 16)"), "{out}");
+    assert!(rule_of(&out, ".bar::UISizeConstraint").contains("MaxSize = Vector2.new(math.huge, 4)"), "{out}");
+    // A cap would stop an item from growing along the line.
+    assert!(!out.contains("\".grow::UISizeConstraint\""), "{out}");
+}
+
+#[test]
+fn max_width_and_min_width_combine_with_the_stretch_cap() {
+    let (out, _) = compile(".a { width: 300px; height: 20px; max-width: 200px; min-height: 30px; }", &["--approx"]);
+    let cap = rule_of(&out, ".a::UISizeConstraint");
+    assert!(cap.contains("MaxSize = Vector2.new(200, 30)"), "{out}");
+    assert!(cap.contains("MinSize = Vector2.new(0, 30)"), "{out}");
+}
+
+#[test]
+fn margins_offset_positioned_elements_like_css() {
+    let (out, stderr) = compile(
+        ".card { position: absolute; inset: 0; margin: 8px; } \
+         .pin { position: absolute; right: 10px; top: 0; margin-right: 5px; margin-top: 2px; width: 10px; height: 10px; } \
+         .mid { position: absolute; left: 0; right: 0; width: 200px; height: 40px; margin-inline: auto; }",
+        &["--approx"],
+    );
+    let card = rule_of(&out, ".card");
+    assert!(card.contains("Size = UDim2.new(1, -16, 1, -16)"), "{out}");
+    assert!(card.contains("Position = UDim2.new(0, 8, 0, 8)"), "{out}");
+    let pin = rule_of(&out, ".pin");
+    assert!(pin.contains("Position = UDim2.new(1, -15, 0, 2)"), "{out}");
+    assert!(pin.contains("AnchorPoint = Vector2.new(1, 0)"), "{out}");
+    let mid = rule_of(&out, ".mid");
+    assert!(mid.contains("Position = UDim2.new(0.5, 0, 0, 0)"), "{out}");
+    assert!(mid.contains("AnchorPoint = Vector2.new(0.5, 0)"), "{out}");
+    assert!(!stderr.contains("margin"), "positioned margins are exact:\n{stderr}");
+}
+
+#[test]
+fn margins_in_flow_move_the_element_and_warn_about_siblings() {
+    let (out, stderr) = compile(
+        ".a { width: 200px; height: 40px; margin: 0 auto; } .b { margin-left: auto; width: 10px; height: 10px; }",
+        &["--approx"],
+    );
+    assert!(rule_of(&out, ".a").contains("AnchorPoint = Vector2.new(0.5, 0)"), "{out}");
+    let b = rule_of(&out, ".b");
+    assert!(b.contains("Position = UDim2.new(1, 0, 0, 0)"), "{out}");
+    assert!(b.contains("AnchorPoint = Vector2.new(1, 0)"), "{out}");
+    assert!(stderr.contains("siblings don't make room"), "{stderr}");
+    assert!(!stderr.contains("no Roblox equivalent"), "{stderr}");
+}
+
+#[test]
+fn line_height_pads_the_half_leading_like_css() {
+    let (out, _) = compile(
+        ".label { font-size: 20px; line-height: 1.5; padding: 4px; &.big { padding: 6px; } } \
+         .px { font-size: 20px; line-height: 24px; } .one { font-size: 20px; line-height: 1; }",
+        &["--approx"],
+    );
+    // (1.5 - 1) x 20 / 2 = 5 above and below, on top of the padding.
+    let label = rule_of(&out, ".label::UIPadding");
+    assert!(label.contains("PaddingTop = UDim.new(0, 9)"), "{out}");
+    assert!(label.contains("PaddingLeft = UDim.new(0, 4)"), "{out}");
+    // A rule that only changes the padding keeps the line height from the cascade.
+    assert!(rule_of(&out, ".label.big::UIPadding").contains("PaddingTop = UDim.new(0, 11)"), "{out}");
+    assert!(rule_of(&out, ".px::UIPadding").contains("PaddingBottom = UDim.new(0, 2)"), "{out}");
+    assert!(!out.contains("\".one::UIPadding\""), "{out}");
+}
+
+#[test]
+fn align_content_aligns_a_blocks_text() {
+    let (out, stderr) = compile(
+        ".a { align-content: center; } .b { display: flex; flex-wrap: wrap; align-content: center; }",
+        &["--approx"],
+    );
+    assert!(rule_of(&out, ".a").contains("TextYAlignment = Enum.TextYAlignment.Center"), "{out}");
+    // `.a` and the user-agent default (text starts at the top, as in CSS); `.b` has none.
+    assert_eq!(out.matches("TextYAlignment =").count(), 2, "only `.a` aligns its text:\n{out}");
+    assert!(stderr.contains("`align-content` on a flex or grid container"), "{stderr}");
+}
+
+#[test]
+fn box_sizing_border_box_is_what_roblox_does() {
+    let (_, stderr) = compile(".a { box-sizing: border-box; }", &["--approx"]);
+    assert!(!stderr.contains("warning"), "{stderr}");
+    let (_, stderr) = compile(".a { box-sizing: content-box; }", &["--approx"]);
+    assert!(stderr.contains("`box-sizing: content-box` isn't supported"), "{stderr}");
+}
+
+#[test]
+fn strict_fails_on_css_that_lays_out_differently() {
+    /// Compiles with `--approx --strict`; returns (exit code, stdout, stderr).
+    fn strict(scss: &str) -> (i32, String, String) {
+        let dir = TempDir::new("strict");
+        let input = dir.write("in.scss", scss);
+        run(&[input.to_str().unwrap(), "-o", "-", "--approx", "--strict"], None)
+    }
+    let scss = ".fill { width: auto; height: 10px; } .text { font-size: 14px; } .v { vertical-align: middle; } \
+                .tall { display: flex; height: 100px; width: 10px; } .ok { font-family: Roboto; font-size: 14px; }";
+    let (_, stderr) = compile(scss, &["--approx"]);
+    assert!(!stderr.contains("strict:"), "only with --strict:\n{stderr}");
+    let (code, stdout, stderr) = strict(scss);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stdout.is_empty(), "no output is written:\n{stdout}");
+    assert!(stderr.contains("error: strict: `width: auto` fills the parent"), "{stderr}");
+    assert!(stderr.contains("strict: Roblox's TextSize is the height of a line"), "{stderr}");
+    assert!(stderr.contains("strict: `vertical-align`"), "{stderr}");
+    assert!(stderr.contains("not to the container's height"), "{stderr}");
+    assert_eq!(stderr.matches("strict: Roblox's TextSize").count(), 1, "`.ok` has a built-in family:\n{stderr}");
+    assert!(stderr.contains("--strict is set; no output written"), "{stderr}");
+
+    let (code, _, stderr) = strict(".pad { width: 100px; height: 20px; padding: 4px; }");
+    assert_eq!(code, 1);
+    assert!(stderr.contains("set `box-sizing: border-box`"), "{stderr}");
+    let (code, _, stderr) = strict(".pad { box-sizing: border-box; width: 100px; height: 20px; padding: 4px; }");
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!stderr.contains("warning") && !stderr.contains("error"), "{stderr}");
+
+    // A column stretches to its own width in CSS, to its widest item in Roblox.
+    let (code, _, stderr) = strict(".col { display: flex; flex-direction: column; width: 300px; height: 100px; }");
+    assert_eq!(code, 1);
+    assert!(stderr.contains("not to the container's width"), "{stderr}");
+    for ok in [
+        ".col { display: flex; flex-direction: column; align-items: flex-start; width: 300px; height: 100px; }",
+        ".col { display: flex; flex-direction: column; width: fit-content; height: fit-content; }",
+        ".row { display: flex; width: 300px; height: fit-content; }",
+    ] {
+        let (code, _, stderr) = strict(ok);
+        assert_eq!(code, 0, "{ok}\n{stderr}");
+    }
+
+    // Absolutely positioned children of a layout container join the layout.
+    let (code, _, stderr) =
+        strict(".card { position: relative; display: flex; align-items: flex-start; width: 10px; height: 10px; }");
+    assert_eq!(code, 1);
+    assert!(stderr.contains("takes part in Roblox's layout"), "{stderr}");
+
+    // A percentage of a parent that is sized by its content.
+    let (code, _, stderr) = strict(
+        ".card { width: fit-content; height: fit-content; } .card > .bar { width: 100%; height: 6px; } \
+         .box { width: 200px; height: fit-content; } .box > .bar { width: 50%; height: 6px; }",
+    );
+    assert_eq!(code, 1);
+    assert!(stderr.contains("`width: 100%` is a percentage of `.card`"), "{stderr}");
+    assert!(!stderr.contains("of `.box`"), "{stderr}");
+
+    // `fr` tracks need a grid with a size to share out, from its own rule or another.
+    let (code, _, stderr) =
+        strict(".grid { display: grid; grid-template-columns: repeat(4, 1fr); grid-auto-rows: 40px; }");
+    assert_eq!(code, 1);
+    assert!(stderr.contains("`fr` tracks share out the grid's width"), "{stderr}");
+    let (code, _, stderr) = strict(
+        ".grid { display: grid; grid-template-columns: repeat(4, 1fr); grid-auto-rows: 40px; } \
+         .grid { width: 100%; height: fit-content; }",
+    );
+    assert_eq!(code, 0, "{stderr}");
+
+    // A rule that only changes the border inherits the padding, and whether it's inside the size.
+    let (code, _, stderr) = strict(
+        ".card { box-sizing: border-box; width: 100px; height: 20px; padding: 4px; border: 1px solid #fff; }          .card.hot { border: 2px solid red; }",
+    );
+    assert_eq!(code, 0, "{stderr}");
+
+    // Grids need a row height.
+    let (code, _, stderr) =
+        strict(".grid { display: grid; grid-template-columns: repeat(3, 1fr); width: 300px; height: fit-content; }");
+    assert_eq!(code, 1);
+    assert!(stderr.contains("error: strict: grid cells need a size on both axes"), "{stderr}");
+}
+
+#[test]
+fn font_size_is_the_em_so_text_size_scales_by_the_familys_line_height() {
+    let (out, _) = compile(
+        ".mono { font-family: \"Roboto Mono\"; font-size: 13px; line-height: 1; } \
+         .mono.sans { font-family: \"Source Sans Pro\"; } .big { font-family: Roboto; font-size: 20px; }",
+        &["--approx"],
+    );
+    // 13px x Roboto Mono's 1.3188 is a 17px line; `line-height: 1` pulls it back to 13px.
+    let mono = rule_of(&out, ".mono");
+    assert!(mono.contains("TextSize = 17"), "{out}");
+    let pad = rule_of(&out, ".mono::UIPadding");
+    assert!(pad.contains("PaddingTop = UDim.new(0, -2)") && pad.contains("PaddingBottom = UDim.new(0, -2)"), "{out}");
+    // Changing only the family re-sizes the text, and splits an odd leading into whole pixels.
+    assert!(rule_of(&out, ".mono.sans").contains("TextSize = 16"), "{out}");
+    let pad = rule_of(&out, ".mono.sans::UIPadding");
+    assert!(pad.contains("PaddingTop = UDim.new(0, -2)") && pad.contains("PaddingBottom = UDim.new(0, -1)"), "{out}");
+    // With `line-height: normal` the family's own line is already what a browser draws.
+    assert!(rule_of(&out, ".big").contains("TextSize = 23"), "{out}");
+    assert!(!out.contains("\".big::UIPadding\""), "{out}");
+}
+
+#[test]
+fn non_colour_custom_properties_are_compiled_in() {
+    let (out, stderr) = compile(
+        ":root { --accent: #7c5cff; --font-body: \"Source Sans Pro\", sans-serif; --radius: 8px; \
+         --grad: linear-gradient(90deg, #000 0%, #fff 100%); } \
+         .a { font-family: var(--font-body); font-size: 13px; border-radius: var(--radius); \
+              background: var(--grad); color: var(--accent); }",
+        &["--approx"],
+    );
+    assert!(!stderr.contains("ignored") && !stderr.contains("unsupported"), "{stderr}");
+    let a = rule_of(&out, ".a");
+    assert!(a.contains("rbxasset://fonts/families/SourceSansPro.json"), "{out}");
+    assert!(a.contains("TextSize = 16"), "the family is known, so the size scales:\n{out}");
+    // A colour token stays a live reference, so a theme can still change it.
+    assert!(a.contains("TextColor3 = \"$accent\""), "{out}");
+    assert!(rule_of(&out, ".a::UICorner").contains("CornerRadius = UDim.new(0, 8)"), "{out}");
+    assert!(out.contains("\".a::UIGradient\""), "{out}");
+    // The gradient token itself can only be an attribute as text, never as a Luau call.
+    assert!(out.contains("SetAttribute(\"grad\", \"linear-gradient("), "{out}");
+    assert!(!out.contains("linear-gradient(90, "), "{out}");
+}
+
+#[test]
+fn border_colours_from_tokens() {
+    let (out, _) = compile(
+        ":root { --line: #445566; --faint: rgba(255, 255, 255, 0.08); } \
+         .a { border: 1px solid var(--line); } .b { border: 1px solid var(--faint); }",
+        &["--approx"],
+    );
+    // An opaque token stays a live reference, in the shorthand as in `border-color`.
+    assert!(rule_of(&out, ".a::UIStroke").contains("Color = \"$line\""), "{out}");
+    // A translucent one is compiled in: a Color3 attribute would drop its alpha.
+    let b = rule_of(&out, ".b::UIStroke");
+    assert!(b.contains("Color = Color3.fromRGB(255, 255, 255)"), "{out}");
+    assert!(b.contains("Transparency = 0.92"), "{out}");
+}
+
+#[test]
+fn a_gradient_background_under_text_warns() {
+    let (_, stderr) =
+        compile(".btn { background: linear-gradient(90deg, #7c5cff, #ff5c8a); color: white; }", &["--approx"]);
+    assert!(stderr.contains("a gradient background also tints this element's text"), "{stderr}");
+    let (_, stderr) = compile(".swatch { background: linear-gradient(90deg, #7c5cff, #ff5c8a); }", &["--approx"]);
+    assert!(!stderr.contains("tints"), "{stderr}");
+    // The gradient-text idiom is meant to tint the text.
+    let (_, stderr) = compile(
+        ".t { background: linear-gradient(90deg, #7c5cff, #ff5c8a); background-clip: text; color: transparent; }",
+        &["--approx"],
+    );
+    assert!(!stderr.contains("tints"), "{stderr}");
+}
+
+#[test]
+fn gradient_angles_follow_the_elements_shape() {
+    let (out, stderr) = compile(
+        ".bar { width: 200px; height: 10px; background: linear-gradient(135deg, #000, #fff); } \
+         .sq { width: 50px; height: 50px; background: linear-gradient(135deg, #000, #fff); } \
+         .corner { background: linear-gradient(to bottom right, #000, #fff); } \
+         .flex { width: 50%; height: 6px; background: linear-gradient(135deg, #000, #fff); } \
+         .near { width: 50%; height: 6px; background: linear-gradient(95deg, #000, #fff); }",
+        &["--approx"],
+    );
+    // A real 135deg on a 200x10 bar runs almost along it: atan(10 / 200).
+    assert!(rule_of(&out, ".bar::UIGradient").contains("Rotation = 2.862405"), "{out}");
+    assert!(rule_of(&out, ".sq::UIGradient").contains("Rotation = 45"), "{out}");
+    // Corner to corner in both, whatever the shape.
+    assert!(rule_of(&out, ".corner::UIGradient").contains("Rotation = 45"), "{out}");
+    assert!(stderr.contains("a `135deg` gradient's direction depends on the element's shape"), "{stderr}");
+    // `.near` is close enough to a right angle that the shape barely moves it.
+    assert_eq!(stderr.matches("depends on the element's shape").count(), 1, "only `.flex`:\n{stderr}");
+}
+
+#[test]
+fn a_border_takes_room_inside_the_box_like_css() {
+    let (out, _) = compile(
+        ".card { border: 1px solid #fff; padding: 8px; } .card.hot { border: 3px solid red; } \
+         .card.flat { border: none; } .plain { border: 2px solid #fff; }",
+        &["--approx"],
+    );
+    assert!(rule_of(&out, ".card::UIPadding").contains("PaddingTop = UDim.new(0, 9)"), "{out}");
+    // A rule that only changes the border keeps the padding it inherits.
+    assert!(rule_of(&out, ".card.hot::UIPadding").contains("PaddingLeft = UDim.new(0, 11)"), "{out}");
+    assert!(rule_of(&out, ".card.flat::UIPadding").contains("PaddingLeft = UDim.new(0, 8)"), "{out}");
+    assert!(rule_of(&out, ".plain::UIPadding").contains("PaddingRight = UDim.new(0, 2)"), "{out}");
+}
+
+#[test]
+fn a_gradient_angle_uses_a_size_from_a_weaker_rule() {
+    let (out, stderr) = compile(
+        ".card { width: 200px; height: 10px; } .card.hot { background: linear-gradient(135deg, #000, #fff); }",
+        &["--approx"],
+    );
+    assert!(rule_of(&out, ".card.hot::UIGradient").contains("Rotation = 2.862405"), "{out}");
+    assert!(!stderr.contains("depends on the element's shape"), "{stderr}");
+    // The size stays the weaker rule's: the gradient rule doesn't restate it.
+    assert!(!rule_of(&out, ".card.hot").contains("Size ="), "{out}");
+}
+
+#[test]
+fn strict_without_approx_says_it_checked_nothing() {
+    let (_, stderr) = compile(".a { Size: UDim2.new(0, 10, 0, 10); }", &["--strict"]);
+    assert!(stderr.contains("--strict checks how CSS properties are translated, which needs --approx"), "{stderr}");
+}
+
+#[test]
+fn a_redefined_token_stays_a_reference() {
+    let (out, _) =
+        compile(":root { --gap: 8px; } .dense { --gap: 4px; } .a { display: flex; gap: var(--gap); }", &["--approx"]);
+    assert!(!rule_of(&out, ".a::UIListLayout").contains("UDim.new(0, 8)"), "{out}");
+}
+
+#[test]
+fn css_defaults_for_backgrounds_borders_and_text_alignment() {
+    let (out, _) = compile(".a { width: 10px; height: 10px; }", &["--approx"]);
+    let gui = rule_of(
+        &out,
+        "Frame, TextLabel, TextButton, TextBox, ImageLabel, ImageButton, ScrollingFrame, CanvasGroup, VideoFrame, ViewportFrame",
+    );
+    assert!(gui.contains("BackgroundTransparency = 1") && gui.contains("BorderSizePixel = 0"), "{out}");
+    assert!(rule_of(&out, "TextButton, ImageButton").contains("AutoButtonColor = false"), "{out}");
+    let text = rule_of(&out, "TextLabel, TextBox");
+    assert!(text.contains("TextXAlignment = Enum.TextXAlignment.Left"), "{out}");
+    assert!(text.contains("TextYAlignment = Enum.TextYAlignment.Top"), "{out}");
+}
+
+#[test]
+fn a_growing_item_without_a_width_starts_from_zero() {
+    let (out, stderr) =
+        compile(".card { flex-grow: 1; } .fixed { flex-grow: 1; width: 120px; height: 20px; }", &["--approx"]);
+    // Sized by its content, a percentage-wide child would inflate it to the whole line.
+    let card = rule_of(&out, ".card");
+    assert!(card.contains("Size = UDim2.new(0, 0, 0, 0)"), "{out}");
+    assert!(card.contains("AutomaticSize = Enum.AutomaticSize.Y,"), "{out}");
+    assert!(rule_of(&out, ".fixed").contains("Size = UDim2.new(0, 120, 0, 20)"), "{out}");
+    assert!(!stderr.contains("only `width`"), "{stderr}");
 }

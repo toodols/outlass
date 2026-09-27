@@ -103,6 +103,9 @@ fn token_value(v: &Value, name: &str, diag: &mut Diagnostics, span: &crate::diag
     match crate::eval::evaluate_expression(text) {
         // A bare `1px solid red` is three values where an attribute holds one, so it stays text.
         Ok(Value::List { items, bracketed: false, .. }) if items.len() > 1 => Value::quoted(text.clone()),
+        // So does a CSS function such as `linear-gradient(...)`, which has no attribute type. Its
+        // uses are compiled in instead (see inline_tokens).
+        Ok(Value::Call { name, .. }) if name.contains('-') => Value::quoted(text.clone()),
         Ok(parsed) => parsed,
         Err(e) => {
             let hint = if text.contains('$') {
@@ -118,6 +121,165 @@ fn token_value(v: &Value, name: &str, diag: &mut Diagnostics, span: &crate::diag
     }
 }
 
+/// Custom properties whose uses are compiled in rather than referenced. A `var()` becomes a
+/// `"$Token"` reference, which Roblox resolves at run time (so themes can change it), but only an
+/// opaque colour token works that way everywhere outlass translates CSS: a font family, a length or
+/// a gradient has to be known at compile time to become a FontFace, a UDim or a UIGradient, and a
+/// Color3 attribute has no alpha, so a translucent colour's transparency would be lost. So the
+/// `:root` value of every other token is substituted into the declarations that use it, unless a
+/// rule or query redefines that token, in which case its value isn't fixed.
+fn inline_tokens(sheet: &Sheet) -> HashMap<String, Value> {
+    let redefined: Vec<&str> = sheet.rules.iter().flat_map(|r| r.tokens.iter().map(|t| t.name.as_str())).collect();
+    sheet
+        .tokens
+        .iter()
+        .filter(|t| !redefined.contains(&t.name.as_str()))
+        .filter_map(|t| {
+            let v = token_value(&t.value, &t.name, &mut Diagnostics::default(), &t.span);
+            let v = match &v {
+                // Kept as text for the attribute; the declaration needs the value itself.
+                Value::Str { text, quoted: true } => crate::eval::evaluate_expression(text).unwrap_or(v),
+                _ => v,
+            };
+            (!matches!(&v, Value::Color(c) if c.a >= 1.0)).then(|| (t.name.clone(), v))
+        })
+        .collect()
+}
+
+/// Substitutes the inlined tokens' values for their `var()` references, anywhere in `v`.
+fn inline_vars(v: &Value, tokens: &HashMap<String, Value>) -> Value {
+    if tokens.is_empty() {
+        return v.clone();
+    }
+    match v {
+        Value::Call { name, args } if name == "var" => {
+            let token = args.first().and_then(|a| a.as_str()).and_then(|a| a.strip_prefix("--"));
+            match token.and_then(|t| tokens.get(t)) {
+                Some(value) => value.clone(),
+                // `var(--x, fallback)` for an unknown token falls back, as in CSS.
+                None if token.is_some_and(|t| !tokens.contains_key(t)) && args.len() > 1 => {
+                    inline_vars(&args[1], tokens)
+                }
+                None => v.clone(),
+            }
+        }
+        Value::Call { name, args } => {
+            Value::Call { name: name.clone(), args: args.iter().map(|a| inline_vars(a, tokens)).collect() }
+        }
+        Value::List { items, sep, bracketed } => Value::List {
+            items: items.iter().map(|i| inline_vars(i, tokens)).collect(),
+            sep: *sep,
+            bracketed: *bracketed,
+        },
+        _ => v.clone(),
+    }
+}
+
+/// `--strict`: a percentage size needs a parent whose size on that axis is known. Under a parent
+/// sized by its content, Roblox resolves it to 0, or inflates the parent in a feedback loop when
+/// that parent grows along a flex line; CSS would treat it as `auto`. A stylesheet only knows an
+/// element's parent when a child combinator names it (`.card > .bar`), so that's what's checked,
+/// against the rules written for exactly that parent selector.
+fn check_percentages_under_content(sheet: &Sheet, diag: &mut Diagnostics) {
+    use crate::selector::{Combinator, Part, SelectorList};
+    let is_percent = |v: &Value| match v {
+        Value::Number(n) => n.has_unit("%"),
+        Value::Call { name, .. } if name == "calc" => v.inspect().contains('%'),
+        _ => false,
+    };
+    for rule in sheet.rules.iter().filter(|r| !r.query) {
+        for (axis, edges) in [("width", ["left", "right"]), ("height", ["top", "bottom"])] {
+            let Some(decl) = rule.decls.iter().rev().find(|d| d.name == axis) else { continue };
+            if !is_percent(&decl.value) {
+                continue;
+            }
+            for complex in &rule.selector.0 {
+                let Some(at) = complex.iter().rposition(|p| matches!(p, Part::Comb(Combinator::Child))) else {
+                    continue;
+                };
+                let parent = SelectorList(vec![complex[..at].to_vec()]);
+                let parent_rules: Vec<&OutRule> =
+                    sheet.rules.iter().filter(|r| !r.query && r.selector.0.iter().any(|c| *c == parent.0[0])).collect();
+                if parent_rules.is_empty() {
+                    continue;
+                }
+                let decls = || parent_rules.iter().flat_map(|r| r.decls.iter());
+                let sized = decls().rfind(|d| d.name == axis).is_some_and(|d| {
+                    !d.value.as_str().is_some_and(|s| {
+                        matches!(
+                            s.to_ascii_lowercase().as_str(),
+                            "auto" | "fit-content" | "max-content" | "min-content"
+                        )
+                    })
+                });
+                let stretched =
+                    edges.iter().all(|e| decls().any(|d| d.name == *e)) || decls().any(|d| d.name == "inset");
+                if !sized && !stretched {
+                    diag.error(
+                        format!(
+                            "strict: `{axis}: {}` is a percentage of `{}`, which is sized by its content; Roblox resolves \
+                             it to 0 (or inflates the parent) where CSS treats it as `auto`; give the parent a `{axis}`",
+                            decl.value.to_css().unwrap_or_default(),
+                            parent.to_css()
+                        ),
+                        Some(&decl.span),
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// `--strict`: a `1fr` track is a share of the grid's own size. A grid sized by its content has
+/// none to share: CSS then sizes the tracks from their contents, while Roblox's cells are a
+/// fraction of whatever the grid ends up as. The grid's size may come from any rule for the same
+/// elements (one with the same selector, or a weaker one that matches them all).
+fn check_fractional_grids(sheet: &Sheet, diag: &mut Diagnostics) {
+    let is_fractional = |v: &Value| {
+        let text = v.to_css().unwrap_or_else(|_| v.inspect());
+        text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '.'))
+            .any(|t| t.strip_suffix("fr").is_some_and(|n| !n.is_empty() && n.parse::<f64>().is_ok()))
+    };
+    let is_length = |v: &Value| match v {
+        Value::Number(_) => true,
+        Value::Call { name, .. } => name == "calc",
+        _ => false,
+    };
+    for rule in sheet.rules.iter().filter(|r| !r.query) {
+        let relevant: Vec<&OutRule> = sheet
+            .rules
+            .iter()
+            .filter(|o| {
+                !o.query
+                    && o.parent == rule.parent
+                    && (o.selector == rule.selector || o.selector.covers(&rule.selector))
+            })
+            .collect();
+        let decls = || relevant.iter().flat_map(|r| r.decls.iter());
+        for (tracks, axis, edges) in
+            [("grid-template-columns", "width", ["left", "right"]), ("grid-template-rows", "height", ["top", "bottom"])]
+        {
+            let Some(d) = rule.decls.iter().rev().find(|d| d.name == tracks) else { continue };
+            if !is_fractional(&d.value) {
+                continue;
+            }
+            let sized = decls().any(|d| d.name == axis && is_length(&d.value))
+                || edges.iter().all(|e| decls().any(|d| d.name == *e))
+                || decls().any(|d| d.name == "inset");
+            if !sized {
+                diag.error(
+                    format!(
+                        "strict: `fr` tracks share out the grid's {axis}, but this grid is sized by its content, where \
+                         CSS sizes the tracks from their contents and Roblox can't; give the grid a `{axis}` \
+                         (e.g. `100%`)"
+                    ),
+                    Some(&d.span),
+                );
+            }
+        }
+    }
+}
+
 /// Converts evaluated rules into the Roblox StyleRule tree.
 pub fn lower(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -> (Vec<(String, String)>, Vec<RobloxRule>) {
     let sheet_attributes = attributes(&sheet.tokens, &opts.luau, diag);
@@ -126,6 +288,13 @@ pub fn lower(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -> (V
     let hides_anything = sheet.rules.iter().any(|r| r.decls.iter().any(hides));
     let parts = cascade_parts(sheet, opts, diag);
     let priorities = cascade_priorities(sheet, &parts, opts);
+    let tokens = inline_tokens(sheet);
+    if opts.approx.strict && opts.approx.groups.contains(&approx::Group::Size) {
+        check_percentages_under_content(sheet, diag);
+    }
+    if opts.approx.strict && opts.approx.groups.contains(&approx::Group::Layout) {
+        check_fractional_grids(sheet, diag);
+    }
 
     for (idx, rule) in sheet.rules.iter().enumerate() {
         if rule.selector.0.is_empty() || rule.query {
@@ -140,7 +309,7 @@ pub fn lower(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -> (V
         for (part, important) in &parts[idx] {
             let priority = priorities.get(&(idx, *important)).copied().flatten();
             let inherited = inherited_decls(sheet, idx);
-            let mut lowered = lower_rule(part, &inherited, selector.clone(), priority, opts, diag);
+            let mut lowered = lower_rule(part, &inherited, &tokens, selector.clone(), priority, opts, diag);
             if !hides_anything {
                 drop_generated_visible(part, &mut lowered);
             }
@@ -176,13 +345,38 @@ pub fn lower(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -> (V
     // AutomaticSize is a floor rather than a replacement — it never shrinks an element below its
     // Size — and `--approx=size` turns every CSS `width`/`height` into Size *and* an explicit
     // AutomaticSize, so a rule that sizes an element switches this straight back off.
+    let mut gui_defaults = Vec::new();
     if opts.approx.groups.contains(&approx::Group::Size) {
+        gui_defaults.push(("AutomaticSize".to_string(), "Enum.AutomaticSize.XY".to_string()));
+    }
+    // A CSS box has no background and no border unless given one; a fresh GuiObject has an opaque
+    // grey background and a 1px legacy border. Any rule with a background sets
+    // BackgroundTransparency itself (see the transparency cascade), and any border clears
+    // BorderSizePixel, so these only fill in what CSS leaves unset.
+    if opts.approx.groups.contains(&approx::Group::Color) {
+        gui_defaults.push(("BackgroundTransparency".to_string(), "1".to_string()));
+        gui_defaults.push(("BorderSizePixel".to_string(), "0".to_string()));
+    }
+    if !gui_defaults.is_empty() {
         rules.insert(
             0,
             RobloxRule {
                 selector: GUI_OBJECT_CLASSES.join(", "),
                 priority: Some(lowest),
-                props: vec![("AutomaticSize".to_string(), "Enum.AutomaticSize.XY".to_string())],
+                props: gui_defaults,
+                ..Default::default()
+            },
+        );
+    }
+    // Roblox darkens a button's background on hover and press by itself; a browser button only
+    // changes when a `:hover`/`:active` rule says so.
+    if opts.approx.groups.contains(&approx::Group::Color) {
+        rules.insert(
+            0,
+            RobloxRule {
+                selector: "TextButton, ImageButton".to_string(),
+                priority: Some(lowest),
+                props: vec![("AutoButtonColor".to_string(), "false".to_string())],
                 ..Default::default()
             },
         );
@@ -219,6 +413,22 @@ pub fn lower(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -> (V
             ..Default::default()
         },
     );
+    // CSS text starts at the top left of its box (`text-align: start`); Roblox centres it both
+    // ways. A button is the exception, whose content browsers centre too.
+    if opts.approx.groups.contains(&approx::Group::Text) {
+        rules.insert(
+            1,
+            RobloxRule {
+                selector: "TextLabel, TextBox".to_string(),
+                priority: Some(lowest),
+                props: vec![
+                    ("TextXAlignment".to_string(), "Enum.TextXAlignment.Left".to_string()),
+                    ("TextYAlignment".to_string(), "Enum.TextYAlignment.Top".to_string()),
+                ],
+                ..Default::default()
+            },
+        );
+    }
     (sheet_attributes, rules)
 }
 
@@ -458,14 +668,68 @@ fn drop_unneeded_stroke_resets(rules: &mut Vec<RobloxRule>) {
 /// CSS properties that outlass folds into one Roblox property (or that are interpreted relative to
 /// each other). CSS cascades each of these separately, but Roblox has e.g. a single `Position`.
 const COMPOSITE_GROUPS: &[&[&str]] = &[
-    // Position, Size, AnchorPoint, AutomaticSize, Rotation
-    &["position", "left", "top", "right", "bottom", "inset", "width", "height", "transform"],
-    // FontFace
-    &["font", "font-family", "font-weight", "font-style"],
-    // UISizeConstraint
-    &["min-width", "min-height", "max-width", "max-height"],
-    // UIListLayout axes depend on the direction
-    &["display", "flex-direction", "flex-wrap", "justify-content", "align-items", "gap", "row-gap", "column-gap"],
+    // Position, Size, AnchorPoint, AutomaticSize, Rotation, and UISizeConstraint (which also caps
+    // an explicit size, unless the element grows along a flex line)
+    &[
+        "position",
+        "left",
+        "top",
+        "right",
+        "bottom",
+        "inset",
+        "width",
+        "height",
+        "transform",
+        "margin",
+        "margin-top",
+        "margin-right",
+        "margin-bottom",
+        "margin-left",
+        "margin-inline",
+        "margin-block",
+        "min-width",
+        "min-height",
+        "max-width",
+        "max-height",
+        "flex",
+        "flex-grow",
+        "box-sizing",
+    ],
+    // FontFace, and UIPadding, which holds the half-leading of the text's line-height as well as
+    // the padding
+    &[
+        "font",
+        "font-family",
+        "font-weight",
+        "font-style",
+        "padding",
+        "padding-top",
+        "padding-right",
+        "padding-bottom",
+        "padding-left",
+        "padding-inline",
+        "padding-block",
+        "line-height",
+        "font-size",
+        // A CSS border takes up room inside the box, which the padding makes (see border_inset)
+        "border",
+        "border-width",
+        "border-style",
+        // whether the padding is inside the size (checked under --strict)
+        "box-sizing",
+    ],
+    // UIListLayout axes depend on the direction; `align-content` depends on whether it's a container
+    &[
+        "display",
+        "flex-direction",
+        "flex-wrap",
+        "justify-content",
+        "align-items",
+        "align-content",
+        "gap",
+        "row-gap",
+        "column-gap",
+    ],
     // transparency combines colour alpha, opacity, gradients and masks
     &[
         "opacity",
@@ -481,6 +745,9 @@ const COMPOSITE_GROUPS: &[&[&str]] = &[
         "outline",
         "outline-color",
         "scrollbar-color",
+        // a gradient's rotation depends on the element's shape
+        "width",
+        "height",
     ],
     // ScrollingDirection / AutomaticCanvasSize cover both axes
     &["overflow", "overflow-x", "overflow-y"],
@@ -488,9 +755,11 @@ const COMPOSITE_GROUPS: &[&[&str]] = &[
     &["transition", "transition-property", "transition-duration", "transition-timing-function", "transition-delay"],
 ];
 
-fn composite_group(name: &str) -> Option<&'static [&'static str]> {
+/// The composite groups a property belongs to. Most belong to one; a few feed two Roblox
+/// properties that cascade separately (a border is a UIStroke and room inside the UIPadding).
+fn composite_groups(name: &str) -> Vec<&'static [&'static str]> {
     let bare = name.strip_prefix("-webkit-").unwrap_or(name);
-    COMPOSITE_GROUPS.iter().copied().find(|group| group.contains(&bare))
+    COMPOSITE_GROUPS.iter().copied().filter(|group| group.contains(&bare)).collect()
 }
 
 /// Per-axis cascade for composite properties. When a rule sets part of a composite group (say
@@ -502,10 +771,10 @@ fn inherited_decls(sheet: &Sheet, index: usize) -> Vec<Decl> {
     let groups: Vec<&[&str]> = {
         let mut groups: Vec<&[&str]> = Vec::new();
         for decl in rule.decls.iter().filter(|d| is_css_property(&d.name)) {
-            if let Some(group) = composite_group(&decl.name)
-                && !groups.iter().any(|g| std::ptr::eq(*g, group))
-            {
-                groups.push(group);
+            for group in composite_groups(&decl.name) {
+                if !groups.iter().any(|g| std::ptr::eq(*g, group)) {
+                    groups.push(group);
+                }
             }
         }
         groups
@@ -534,7 +803,7 @@ fn inherited_decls(sheet: &Sheet, index: usize) -> Vec<Decl> {
         .flat_map(|(_, other)| other.decls.iter())
         .filter(|d| {
             is_css_property(&d.name)
-                && composite_group(&d.name).is_some_and(|g| groups.iter().any(|x| std::ptr::eq(*x, g)))
+                && composite_groups(&d.name).iter().any(|g| groups.iter().any(|x| std::ptr::eq(*x, *g)))
         })
         .map(|d| Decl { name: d.name.clone(), value: d.value.clone(), span: Some(d.span.clone()) })
         .collect()
@@ -562,6 +831,7 @@ fn restrict_to(mut full: approx::Translated, keys: &approx::Translated) -> appro
 fn lower_rule(
     rule: &OutRule,
     inherited: &[Decl],
+    tokens: &HashMap<String, Value>,
     selector: String,
     priority: Option<f64>,
     opts: &CodegenOptions,
@@ -570,15 +840,18 @@ fn lower_rule(
     let mut main = RobloxRule { selector, priority, ..Default::default() };
     main.attributes = attributes(&rule.tokens, &opts.luau, diag);
 
-    let mut css: Vec<Decl> =
-        inherited.iter().map(|d| Decl { name: d.name.clone(), value: d.value.clone(), span: d.span.clone() }).collect();
+    let mut css: Vec<Decl> = inherited
+        .iter()
+        .map(|d| Decl { name: d.name.clone(), value: inline_vars(&d.value, tokens), span: d.span.clone() })
+        .collect();
     let mut explicit: Vec<(String, String)> = Vec::new();
     let mut explicit_transitions: Vec<(String, String)> = Vec::new();
     for decl in &rule.decls {
         if CONTAINER_PROPERTIES.contains(&decl.name.as_str()) {
             // Marks the element as a query container; see query_definitions.
         } else if is_css_property(&decl.name) {
-            css.push(Decl { name: decl.name.clone(), value: decl.value.clone(), span: Some(decl.span.clone()) });
+            let value = inline_vars(&decl.value, tokens);
+            css.push(Decl { name: decl.name.clone(), value, span: Some(decl.span.clone()) });
         } else if decl.name.eq_ignore_ascii_case("Transition") {
             match approx::roblox_transitions(&decl.value) {
                 Ok(list) => {
@@ -621,7 +894,7 @@ fn lower_rule(
             .decls
             .iter()
             .filter(|d| is_css_property(&d.name))
-            .map(|d| Decl { name: d.name.clone(), value: d.value.clone(), span: Some(d.span.clone()) })
+            .map(|d| Decl { name: d.name.clone(), value: inline_vars(&d.value, tokens), span: Some(d.span.clone()) })
             .collect();
         let mut own_only = approx::translate(&own, &opts.approx, &mut Diagnostics::default());
         // `opacity` scales what the weaker rules paint, so it recomputes their transparencies too:
@@ -632,6 +905,21 @@ fn lower_rule(
             }
             for (class, prop) in approx::css_pseudo_targets("opacity") {
                 own_only.set_pseudo_prop(class, prop, String::new());
+            }
+        }
+        // TextSize depends on the family as well as the size, and LineHeight and the half-leading
+        // padding on all three and the line-height: `.mono { font-family: ... }` resizes the text.
+        if own.iter().any(|d| matches!(d.name.as_str(), "font" | "font-family" | "font-size" | "line-height")) {
+            own_only.set_prop("TextSize", String::new());
+            own_only.set_prop("LineHeight", String::new());
+            own_only.set_pseudo_prop("UIPadding", "PaddingTop", String::new());
+            own_only.set_pseudo_prop("UIPadding", "PaddingBottom", String::new());
+        }
+        // The border's inset is part of every side's padding: `.card.flat { border: none }` gives
+        // the room back.
+        if own.iter().any(|d| matches!(d.name.as_str(), "border" | "border-width" | "border-style")) {
+            for side in ["PaddingTop", "PaddingRight", "PaddingBottom", "PaddingLeft"] {
+                own_only.set_pseudo_prop("UIPadding", side, String::new());
             }
         }
         restrict_to(approx::translate(&css, &opts.approx, diag), &own_only)

@@ -248,6 +248,11 @@ struct BuildArgs {
     /// Treat warnings as errors (exit status 1)
     #[arg(long)]
     deny_warnings: bool,
+
+    /// Fail on CSS that compiles, but lays out differently in Roblox than in a browser (e.g. a flex
+    /// column that stretches its items, or `width: auto`); each error names the CSS that agrees
+    #[arg(long)]
+    strict: bool,
 }
 
 fn main() -> ExitCode {
@@ -443,6 +448,7 @@ fn codegen_options(args: &BuildArgs, sheet_name: &str, header: Option<String>) -
             groups: Group::expand(&args.approx),
             luau: luau.clone(),
             default_font: args.default_font.clone(),
+            strict: args.strict,
         },
         luau,
         default_priority: args.default_priority,
@@ -500,6 +506,10 @@ fn run_job(job: &Job, args: &BuildArgs, opts: &Options) -> (Vec<PathBuf>, bool) 
         Emit::Css => codegen::emit_css(&combined),
     };
     print_diagnostics(&diag, args);
+    if diag.error_count() > 0 {
+        eprintln!("error: {} layout difference(s) from CSS and --strict is set; no output written", diag.error_count());
+        return (files, false);
+    }
     if args.deny_warnings && diag.warning_count() > 0 {
         eprintln!("error: {} warning(s) and --deny-warnings is set; no output written", diag.warning_count());
         return (files, false);
@@ -534,7 +544,11 @@ fn print_diagnostics(diag: &Diagnostics, args: &BuildArgs) {
     for d in &diag.items {
         let text = d.to_string();
         if color {
-            let code = if d.level == Level::Warning { "33" } else { "36" };
+            let code = match d.level {
+                Level::Warning => "33",
+                Level::Error => "31",
+                Level::Debug => "36",
+            };
             eprintln!("\x1b[{code}m{text}\x1b[0m");
         } else {
             eprintln!("{text}");
@@ -548,6 +562,12 @@ fn usage_error(msg: String) -> ! {
 
 fn build(args: &BuildArgs) -> ExitCode {
     let jobs = plan(args).unwrap_or_else(|e| usage_error(e));
+    // Every strict check is about how translated CSS lays out, so there's nothing to check without it.
+    if args.strict && args.approx.is_empty() && !args.quiet {
+        eprintln!(
+            "warning: --strict checks how CSS properties are translated, which needs --approx; nothing was checked"
+        );
+    }
     let opts = eval_options(args).unwrap_or_else(|e| usage_error(e));
     if args.watch && jobs.iter().any(|j| j.inputs.iter().any(|i| i.as_os_str().is_empty())) {
         usage_error("--watch can't be used with stdin input".into());

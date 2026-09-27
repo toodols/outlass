@@ -80,6 +80,9 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 pub enum Level {
     Warning,
     Debug,
+    /// A `--strict` parity violation: the output would lay out differently from a browser. The
+    /// build fails, but compilation carries on so every violation is reported.
+    Error,
 }
 
 #[derive(Clone, Debug)]
@@ -94,6 +97,7 @@ impl fmt::Display for Diagnostic {
         let label = match self.level {
             Level::Warning => "warning",
             Level::Debug => "debug",
+            Level::Error => "error",
         };
         match &self.span {
             Some(span) => write!(f, "{span}: {label}: {}", self.message),
@@ -117,6 +121,19 @@ impl Diagnostics {
             return;
         }
         self.items.push(Diagnostic { level: Level::Warning, message, span });
+    }
+
+    pub fn error(&mut self, message: impl Into<String>, span: Option<&Span>) {
+        let message = message.into();
+        let span = span.cloned();
+        if self.items.iter().any(|d| d.level == Level::Error && d.message == message && d.span == span) {
+            return;
+        }
+        self.items.push(Diagnostic { level: Level::Error, message, span });
+    }
+
+    pub fn error_count(&self) -> usize {
+        self.items.iter().filter(|d| d.level == Level::Error).count()
     }
 
     pub fn debug(&mut self, message: impl Into<String>, span: Option<&Span>) {

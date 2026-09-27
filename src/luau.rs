@@ -210,6 +210,9 @@ fn call(name: &str, args: &[Value], opts: &LuauOptions) -> Result<String, String
         "calc" | "min" | "max" | "clamp" | "env" | "attr" => Err(format!(
             "CSS {name}() can't be evaluated here; use plain arithmetic, or enable --approx for CSS properties"
         )),
+        // A Luau constructor like `UDim.new(...)` passes through; a CSS function like
+        // `linear-gradient(...)` can't be a Luau call at all.
+        _ if name.contains('-') => Err(format!("CSS {name}() has no Luau equivalent here")),
         _ => {
             let parts = args.iter().map(|a| value(a, opts)).collect::<Result<Vec<_>, _>>()?;
             Ok(format!("{name}({})", parts.join(", ")))
