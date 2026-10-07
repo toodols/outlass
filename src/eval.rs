@@ -89,13 +89,15 @@ impl QueryRef {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Sheet {
     pub rules: Vec<OutRule>,
     /// Stylesheet-level tokens (from `:root` or top-level custom properties).
     pub tokens: Vec<Token>,
     /// Every `@layer` path, in the order the layers were first named.
     pub layers: Vec<Vec<String>>,
+    /// `@font-face` family names and the font assets they stand for.
+    pub font_faces: Vec<(String, String)>,
     /// Every file read during compilation (for `--watch`).
     pub files: Vec<PathBuf>,
 }
@@ -261,6 +263,7 @@ impl Sheet {
         }
         self.rules.append(&mut other.rules);
         self.tokens.append(&mut other.tokens);
+        self.font_faces.append(&mut other.font_faces);
         for layer in other.layers {
             if !self.layers.contains(&layer) {
                 self.layers.push(layer);
@@ -616,6 +619,8 @@ impl<'a> Evaluator<'a> {
             Ok(vec![query::builtin_by_name(name).map_or_else(|| QueryRef::Named(name.to_string()), QueryRef::Known)])
         } else if name == "layer" {
             return self.layer_rule(&params_text, body, env, span);
+        } else if name == "font-face" {
+            return self.font_face(body, env, span);
         } else if name == "media" || name == "container" {
             let parsed =
                 if name == "media" { query::parse_media(&params_text) } else { query::parse_container(&params_text) };
@@ -721,6 +726,50 @@ impl<'a> Evaluator<'a> {
         self.layer = saved_layer;
         self.current_rule = saved_rule;
         result.map(|_| ())
+    }
+
+    /// `@font-face { font-family: Brand; src: url("rbxassetid://123"); }` names a font asset, so
+    /// `font-family: Brand` uses it.
+    fn font_face(&mut self, body: Option<&[Stmt]>, env: &EnvRef, span: &Span) -> Result<()> {
+        let Some(body) = body else { return Ok(()) };
+        let idx = self.sheet.rules.len();
+        self.sheet.rules.push(OutRule {
+            selector: SelectorList::default(),
+            owner: self.current_module,
+            decls: Vec::new(),
+            tokens: Vec::new(),
+            layer: Vec::new(),
+            parent: None,
+            query: false,
+            queries: Vec::new(),
+            span: span.clone(),
+        });
+        let saved_rule = self.current_rule.replace(idx);
+        let result = self.exec_block(body, &new_env(Some(env.clone()), false));
+        self.current_rule = saved_rule;
+        let face = self.sheet.rules.remove(idx);
+        result?;
+        let value = |name: &str| face.decls.iter().rev().find(|d| d.name == name).map(|d| d.value.clone());
+        let family = value("font-family").and_then(|v| v.as_str().map(str::to_string));
+        // The first source that's a url() or a string.
+        let src = value("src").and_then(|v| {
+            let items = match v {
+                Value::List { items, .. } => items,
+                other => vec![other],
+            };
+            items.into_iter().find_map(|item| match item {
+                Value::Call { name, args } if name == "url" => {
+                    args.first().and_then(|a| a.as_str().map(str::to_string))
+                }
+                Value::Str { text, quoted: true } => Some(text),
+                _ => None,
+            })
+        });
+        match (family, src) {
+            (Some(family), Some(src)) => self.sheet.font_faces.push((family, src)),
+            _ => self.diag.warn("@font-face needs a font-family and a url() src (ignored)", Some(span)),
+        }
+        Ok(())
     }
 
     /// Registers `name` (`a` or `a.b`) inside the current layer, with any parents it implies, and

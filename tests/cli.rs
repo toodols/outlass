@@ -1685,3 +1685,107 @@ fn emit_json_writes_a_json_file_by_default() {
     let json = std::fs::read_to_string(dir.path().join("x.json")).unwrap();
     assert!(json.contains(r#""properties": {"Visible": true}"#), "{json}");
 }
+
+// ---------- CSS features ----------
+
+#[test]
+fn text_inside_an_element_inherits_its_text_properties() {
+    let (out, _) = compile(
+        ".card { color: red; text-align: center; } TextLabel { color: blue; } .card .title { color: green; }",
+        &["--approx"],
+    );
+    let inherited = ".card >> TextLabel, .card >> TextButton, .card >> TextBox";
+    let rule = rule_of(&out, inherited);
+    assert!(rule.contains("TextColor3 = Color3.fromRGB(255, 0, 0)"), "{out}");
+    assert!(rule.contains("TextXAlignment = Enum.TextXAlignment.Center"), "{out}");
+    assert!(priority_of(&out, inherited) > 0.0, "inherited values beat the user-agent defaults:\n{out}");
+    assert!(priority_of(&out, inherited) < priority_of(&out, "TextLabel"), "a rule for the text itself wins:\n{out}");
+    assert!(priority_of(&out, inherited) < priority_of(&out, ".card >> .title"), "{out}");
+}
+
+#[test]
+fn a_rule_that_redefines_a_token_recompiles_the_declarations_using_it() {
+    let (out, _) = compile(".a { --gap: 6px; padding: var(--gap); } .a.b { --gap: 10px; }", &["--approx"]);
+    assert!(rule_of(&out, ".a::UIPadding").contains("PaddingTop = UDim.new(0, 6)"), "{out}");
+    assert!(rule_of(&out, ".a.b::UIPadding").contains("PaddingTop = UDim.new(0, 10)"), "{out}");
+}
+
+#[test]
+fn min_max_and_clamp_sizes_become_size_constraints() {
+    let (out, stderr) = compile(".a { width: min(100%, 300px); height: clamp(10px, 50%, 200px); }", &["--approx"]);
+    assert!(rule_of(&out, ".a").contains("Size = UDim2.new(1, 0, 0.5, 0)"), "{out}");
+    let constraint = rule_of(&out, ".a::UISizeConstraint");
+    assert!(constraint.contains("MinSize = Vector2.new(0, 10)"), "{out}");
+    assert!(constraint.contains("MaxSize = Vector2.new(300, 200)"), "{out}");
+    assert!(!stderr.contains("width") && !stderr.contains("height"), "{stderr}");
+}
+
+#[test]
+fn a_clamped_font_size_scales_the_text_between_its_bounds() {
+    let (out, _) =
+        compile(".a { font-size: clamp(12px, 2vw, 20px); } .b { font-size: clamp(12px, 30px, 20px); }", &["--approx"]);
+    assert!(rule_of(&out, ".a").contains("TextScaled = true"), "{out}");
+    let constraint = rule_of(&out, ".a::UITextSizeConstraint");
+    assert!(constraint.contains("MinTextSize = 12") && constraint.contains("MaxTextSize = 20"), "{out}");
+    assert!(rule_of(&out, ".b").contains("TextSize = 20"), "a px value is clamped directly:\n{out}");
+}
+
+#[test]
+fn standalone_transform_properties_act_like_transform() {
+    let (out, _) = compile(".a { translate: 4px 2px; rotate: 45deg; scale: 2; }", &["--approx"]);
+    let a = rule_of(&out, ".a");
+    assert!(a.contains("Position = UDim2.new(0, 4, 0, 2)") && a.contains("Rotation = 45"), "{out}");
+    assert!(rule_of(&out, ".a::UIScale").contains("Scale = 2"), "{out}");
+}
+
+#[test]
+fn image_fitting_and_resampling() {
+    let (out, _) = compile(
+        ".a { object-fit: cover; image-rendering: pixelated; } \
+         .b { background-image: url(\"rbxassetid://1\"); background-size: 32px 32px; } .c { background-size: contain; }",
+        &["--approx"],
+    );
+    assert!(rule_of(&out, ".a").contains("ScaleType = Enum.ScaleType.Crop"), "{out}");
+    assert!(rule_of(&out, ".a").contains("ResampleMode = Enum.ResamplerMode.Pixelated"), "{out}");
+    let b = rule_of(&out, ".b");
+    assert!(b.contains("ScaleType = Enum.ScaleType.Tile") && b.contains("TileSize = UDim2.new(0, 32, 0, 32)"), "{out}");
+    assert!(rule_of(&out, ".c").contains("ScaleType = Enum.ScaleType.Fit"), "{out}");
+}
+
+#[test]
+fn placeholder_color_styles_the_textbox() {
+    let (out, stderr) = compile(".search::placeholder { color: #888; } ::placeholder { color: red; }", &["--approx"]);
+    assert!(rule_of(&out, ".search").contains("PlaceholderColor3 = Color3.fromRGB(136, 136, 136)"), "{out}");
+    assert!(rule_of(&out, "TextBox").contains("PlaceholderColor3 = Color3.fromRGB(255, 0, 0)"), "{out}");
+    assert!(!stderr.contains("placeholder"), "{stderr}");
+}
+
+#[test]
+fn current_color_is_the_rules_color() {
+    let (out, _) = compile(".a { color: red; border: 1px solid currentColor; }", &["--approx"]);
+    assert!(rule_of(&out, ".a::UIStroke").contains("Color = Color3.fromRGB(255, 0, 0)"), "{out}");
+}
+
+#[test]
+fn font_face_names_a_font_asset() {
+    let (out, stderr) = compile(
+        "@font-face { font-family: Brand; src: url(\"rbxassetid://123\") format(\"truetype\"); } \
+         .a { font-family: Brand, sans-serif; }",
+        &["--approx"],
+    );
+    assert!(rule_of(&out, ".a").contains("FontFace = Font.new(\"rbxassetid://123\""), "{out}");
+    assert!(!stderr.contains("font-face") && !stderr.contains("Brand"), "{stderr}");
+}
+
+#[test]
+fn is_and_where_expand_into_selector_lists() {
+    let (out, stderr) = compile(
+        ".a:is(.b, #c) .d { Visible: true; } .y:is(Frame, TextLabel) { Visible: true; } \
+         :where(#x) .e { Visible: true; } .f .e { Visible: false; }",
+        &[],
+    );
+    assert!(out.contains("\".a.b >> .d, .a#c >> .d\""), "{out}");
+    assert!(out.contains("\"Frame.y, TextLabel.y\""), "{out}");
+    assert!(priority_of(&out, "#x >> .e") < priority_of(&out, ".f >> .e"), ":where adds no specificity:\n{out}");
+    assert!(!stderr.contains(":is") && !stderr.contains(":where"), "{stderr}");
+}

@@ -60,9 +60,12 @@ Put it in a ModuleScript and apply it with a `StyleLink` under your `ScreenGui`.
 | `Frame`, `.Tag`, `#Name`, `::UICorner` | same selector syntax |
 | `a b` (descendant) | `a >> b` |
 | `:hover` / `:active` / `:disabled` | `:Hover` / `:Press` / `:NonInteractable` |
+| `:is(...)`, `:where(...)` | expanded into a selector list (`.a:is(.b, .c)` → `.a.b, .a.c`); `:where` adds no specificity |
+| `::placeholder { color }` | `PlaceholderColor3` on the TextBox |
 | nesting, `&`, `&-suffix`, `@extend` | flattened into full selectors, like Sass does |
 | `PascalCase: value` | Roblox property, set to the value below |
 | `--Name: value` | `SetAttribute` on the rule (or on the sheet in `:root`/top level); raw text, so use `#{}` |
+| `@font-face { font-family: Brand; src: url("rbxassetid://…") }` | `font-family: Brand` uses that asset |
 | `var(--Name)`, `token(Name)` | token reference `"$Name"`; in a CSS property, a `:root` token that isn't a colour is compiled in (see below) |
 | the CSS cascade, `!important`, `@layer` | `StyleRule.Priority` (see [The cascade](#the-cascade)) |
 | `Transition: BackgroundColor3 0.2s Quad Out` | `SetPropertyTransitions` (`*`/`all` → `SetDefaultPropertyTransition`) |
@@ -118,8 +121,11 @@ A `var()` in a CSS property is a `"$Name"` reference that Roblox resolves at run
 change it. That only works for opaque colours, though (a Color3 attribute has no alpha, so a translucent
 colour is compiled in too): a font family, a length or a gradient has to be known when
 outlass compiles it into a `FontFace`, a `UDim` or a `UIGradient`. So `var(--font-body)` or
-`var(--radius)` gets the token's `:root` value compiled in, unless a rule or query redefines the token.
-The attribute is still set, as text when it has no attribute type (a gradient).
+`var(--radius)` gets the token's value compiled in. Tokens cascade as in CSS: a rule uses the value
+its own elements get, from `:root`, a weaker rule for the same elements, or the rule itself. When a
+rule redefines a token (`.a.b { --gap: 10px }`), the declarations that use it (`.a { padding: var(--gap) }`)
+are compiled again for that rule. The attribute is still set, as text when it has no attribute type
+(a gradient).
 
 ### A fade from code ends invisible
 
@@ -227,11 +233,11 @@ ignored with a warning that names the flag to enable. Explicit Roblox properties
 
 | Group | Properties | Becomes |
 | --- | --- | --- |
-| `color` | `color`, `background[-color]`, `background-image`, `background-clip`, `mask-image`, `scrollbar-color` | `TextColor3`, `BackgroundColor3` + transparency from alpha, `::UIGradient` for `linear-gradient()` and `repeating-linear-gradient()` (Color from the background, Transparency from a mask), gradient text via `background-clip: text`, `Image` for `url()`, `ScrollBarImageColor3` (the thumb; Roblox draws no track) |
+| `color` | `color`, `background[-color]`, `background-image`, `background-clip`, `background-size`, `background-repeat`, `object-fit`, `image-rendering`, `mask-image`, `scrollbar-color` | `TextColor3`, `BackgroundColor3` + transparency from alpha, `::UIGradient` for `linear-gradient()` and `repeating-linear-gradient()` (Color from the background, Transparency from a mask), gradient text via `background-clip: text`, `Image` for `url()`, `ScaleType` (`cover` → Crop, `contain` → Fit, a `background-size` → Tile + `TileSize`), `ResampleMode` (`pixelated`), `ScrollBarImageColor3` (the thumb; Roblox draws no track) |
 | `opacity` | `opacity` | `1 - x` into `GroupTransparency` (a CanvasGroup fades with its children, like CSS), `TextTransparency`, `ImageTransparency`, and `BackgroundTransparency` when a background is known (combined with color alpha) |
 | `text` | `font*`, `text-align`, `vertical-align`, `align-content`, `line-height`, `white-space`, `text-overflow`, `-webkit-text-stroke[-width|-color]`, `content` | `FontFace` (the first family in the list that Roblox has; unknown names warn, `rbxassetid://` uploads pass through), `TextSize`, `TextX/YAlignment`, `LineHeight` (+ half-leading `::UIPadding`), `TextWrapped`, `TextTruncate`, `::UIStroke`, `Text` |
 | `size` | `width`, `height`, `min-*`, `max-*`, `aspect-ratio`, `box-sizing` | `Size`/`AutomaticSize`, `::UISizeConstraint`, `::UIAspectRatioConstraint` |
-| `position` | `left/top/right/bottom/inset`, `margin*`, `transform`, `z-index` | `Position`, `AnchorPoint`, `Rotation`, `::UIScale`, `ZIndex` |
+| `position` | `left/top/right/bottom/inset`, `margin*`, `transform`, `translate`, `rotate`, `scale`, `z-index` | `Position`, `AnchorPoint`, `Rotation`, `::UIScale`, `ZIndex` |
 | `box` | `border-radius`, `padding*`, `border*`, `outline*` | `::UICorner`, `::UIPadding`, `::UIStroke` |
 | `layout` | `display`, `flex-*`, `justify-content`, `align-*`, `gap`, `grid-template-*`, `grid-auto-*`, `order` | `::UIListLayout`, `::UIGridLayout` (`FillDirectionMaxCells`, `CellSize`, `CellPadding`), `::UIFlexItem`, `LayoutOrder`, `Visible` |
 | `visibility` | `visibility`, `overflow*`, `scrollbar-width`, `scrollbar-gutter`, `pointer-events`, `appearance` | `Visible`, `ClipsDescendants`, `ScrollingEnabled`/`ScrollingDirection`, `AutomaticCanvasSize` + `CanvasSize` (a scrolling axis scrolls exactly its content, like CSS), `ScrollBarThickness`, `VerticalScrollBarInset`, `Interactable`, `AutoButtonColor` |
@@ -265,8 +271,9 @@ It follows CSS semantics where Roblox allows:
 - `line-height` spaces lines as CSS does. Roblox makes the first line exactly `TextSize` tall and applies
   `LineHeight` only between lines, so outlass pads the element by half the leading,
   `(line-height x font-size - TextSize) / 2`, above and below (in whole pixels). A 20px font at
-  `line-height: 1.5` is 30px tall per line in both. outlass has no inheritance, so set it on the text
-  element itself. Roblox caps `LineHeight` at 3.
+  `line-height: 1.5` is 30px tall per line in both. Text inside the element inherits the `LineHeight`
+  but not the padding, so set `line-height` on the text element itself for exact spacing. Roblox caps
+  `LineHeight` at 3.
 - `fit-content` sizes an element from its content even when a weaker rule gives it a size: the Size is
   zeroed, since `AutomaticSize` only grows an element past its Size.
 - `align-content: center` centres a block's text vertically, as it does in CSS. `vertical-align` does
@@ -301,6 +308,17 @@ input emits the transparency they add up to — including `BackgroundTransparenc
 colour. That's what lets `.panel.solid { background-color: #123 }` undo a weaker
 `.panel { background-color: transparent }` instead of staying invisible. The same holds for `color` and
 `TextTransparency`, and for a border's `::UIStroke`.
+
+Text properties are inherited, as in CSS: `color`, `font*`, `line-height`, `text-align` and
+`white-space` on `.card` also style every `TextLabel`, `TextButton` and `TextBox` inside it (a
+`.card >> TextLabel` rule). Inherited values lose to any rule that styles the text element itself.
+CSS takes the nearest ancestor's value, which a selector can't express, so between two ancestors' rules
+the stronger one wins.
+
+`min()`, `max()` and `clamp()` work on sizes when at most one bound is relative: `width: min(100%, 300px)`
+is a 100% width with a 300px `::UISizeConstraint`. `font-size: clamp(12px, 2vw, 20px)` becomes
+`TextScaled` text between 12 and 20 (a `::UITextSizeConstraint`), since Roblox has no viewport units.
+`currentColor` is the rule's `color`.
 
 `opacity` scales those transparencies rather than replacing them: `.a:hover { opacity: 0.5 }` fades
 the background and border `.a` gives it, and leaves a transparent background transparent. A rule that

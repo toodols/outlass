@@ -300,6 +300,15 @@ impl SelectorList {
                     if let Part::Compound(c) = part {
                         for simple in c {
                             match simple {
+                                // `:is()` counts its most specific argument, `:where()` nothing.
+                                Simple::PseudoClass { name, arg: Some(arg) } if is_matches_any(name) => {
+                                    if !name.eq_ignore_ascii_case("where")
+                                        && let Ok(list) = parse(arg)
+                                    {
+                                        let (a, b, c) = list.specificity();
+                                        s = (s.0 + a, s.1 + b, s.2 + c);
+                                    }
+                                }
                                 Simple::Id(_) => s.0 += 1,
                                 Simple::Class(_)
                                 | Simple::Attribute(_)
@@ -324,6 +333,23 @@ impl SelectorList {
         !stronger.0.is_empty() && stronger.0.iter().all(|s| self.0.iter().any(|w| complex_covers(w, s)))
     }
 
+    /// The selector without a final `::name`, when every complex selector in the list ends with one.
+    /// A bare `::placeholder` means any TextBox's.
+    pub fn strip_pseudo_element(&self, name: &str) -> Option<SelectorList> {
+        let mut out = self.clone();
+        for complex in &mut out.0 {
+            let Some(Part::Compound(c)) = complex.last_mut() else { return None };
+            if !matches!(c.last(), Some(Simple::PseudoElement(n)) if n.eq_ignore_ascii_case(name)) {
+                return None;
+            }
+            c.pop();
+            if c.is_empty() {
+                c.push(Simple::Type("TextBox".into()));
+            }
+        }
+        Some(out)
+    }
+
     /// Appends `::Name` to every complex selector.
     pub fn with_pseudo_instance(&self, name: &str) -> SelectorList {
         let mut out = self.clone();
@@ -344,8 +370,49 @@ impl SelectorList {
     /// Roblox GuiStates. Unsupported constructs are kept verbatim with a warning.
     pub fn to_roblox(&self, diag: &mut Diagnostics, span: Option<&Span>) -> String {
         let mut ctx = Some((diag, span));
-        self.0.iter().map(|c| complex_to_string(c, true, &mut ctx)).collect::<Vec<_>>().join(", ")
+        let expanded: Vec<Complex> = self.0.iter().flat_map(expand_matches_any).collect();
+        expanded.iter().map(|c| complex_to_string(c, true, &mut ctx)).collect::<Vec<_>>().join(", ")
     }
+}
+
+/// `:is()` and `:where()` (and the old `:matches()`).
+fn is_matches_any(name: &str) -> bool {
+    matches!(name.to_ascii_lowercase().as_str(), "is" | "where" | "matches")
+}
+
+/// `.a:is(.b, .c) .d` → `.a.b .d`, `.a.c .d`: Roblox has no `:is()`, but the list of its
+/// alternatives selects the same elements. Specificity is taken from the selector as written.
+fn expand_matches_any(complex: &Complex) -> Vec<Complex> {
+    for (pi, part) in complex.iter().enumerate() {
+        let Part::Compound(compound) = part else { continue };
+        let Some(si) = compound
+            .iter()
+            .position(|s| matches!(s, Simple::PseudoClass { name, arg: Some(_) } if is_matches_any(name)))
+        else {
+            continue;
+        };
+        let Simple::PseudoClass { arg: Some(arg), .. } = &compound[si] else { unreachable!() };
+        let Ok(alternatives) = parse(arg) else { return vec![complex.clone()] };
+        let mut rest = compound.clone();
+        rest.remove(si);
+        return alternatives
+            .0
+            .into_iter()
+            .flat_map(|mut alt| {
+                if let Some(Part::Compound(last)) = alt.last_mut() {
+                    // A type selector comes first in a compound: `.x:is(Frame)` is `Frame.x`.
+                    let (types, others): (Vec<Simple>, Vec<Simple>) =
+                        rest.iter().cloned().chain(last.drain(..)).partition(|s| matches!(s, Simple::Type(_)));
+                    *last = types.into_iter().chain(others).collect();
+                }
+                let mut out = complex[..pi].to_vec();
+                out.extend(alt);
+                out.extend_from_slice(&complex[pi + 1..]);
+                expand_matches_any(&out)
+            })
+            .collect();
+    }
+    vec![complex.clone()]
 }
 
 type WarnCtx<'a, 'b> = Option<(&'a mut Diagnostics, Option<&'b Span>)>;

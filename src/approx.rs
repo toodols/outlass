@@ -217,6 +217,30 @@ pub static PROPERTIES: &[PropDoc] = &[
                 by stop, so its stops need percentage positions and only ~20 keypoints fit",
     },
     PropDoc {
+        css: "background-size",
+        group: Group::Color,
+        roblox: "ScaleType / TileSize",
+        notes: "for an image: cover → Crop, contain → Fit, a size → Tile at that size",
+    },
+    PropDoc {
+        css: "background-repeat",
+        group: Group::Color,
+        roblox: "ScaleType",
+        notes: "for an image: no-repeat with a background-size stretches instead of tiling",
+    },
+    PropDoc {
+        css: "object-fit",
+        group: Group::Color,
+        roblox: "ScaleType",
+        notes: "fill → Stretch, contain/scale-down → Fit, cover → Crop",
+    },
+    PropDoc {
+        css: "image-rendering",
+        group: Group::Color,
+        roblox: "ResampleMode",
+        notes: "pixelated/crisp-edges → Pixelated",
+    },
+    PropDoc {
         css: "background-clip",
         group: Group::Color,
         roblox: "UIGradient on the text (::UIGradient), TextColor3",
@@ -294,7 +318,7 @@ pub static PROPERTIES: &[PropDoc] = &[
         roblox: "LineHeight, UIPadding (::UIPadding)",
         notes: "Roblox spaces only the lines after the first, so with a known font-size the element is also \
                 padded by the half-leading, (line-height x font-size - TextSize) / 2, above and below, as CSS \
-                does. outlass has no inheritance: set it on the text element itself",
+                does. Text inside the element inherits LineHeight, but not the padding",
     },
     PropDoc { css: "white-space", group: Group::Text, roblox: "TextWrapped", notes: "" },
     PropDoc { css: "text-wrap", group: Group::Text, roblox: "TextWrapped", notes: "" },
@@ -382,6 +406,9 @@ pub static PROPERTIES: &[PropDoc] = &[
         roblox: "Position/AnchorPoint/Rotation, UIScale (::UIScale)",
         notes: "translate/translateX/translateY/rotate/scale only",
     },
+    PropDoc { css: "translate", group: Group::Position, roblox: "Position/AnchorPoint", notes: "" },
+    PropDoc { css: "rotate", group: Group::Position, roblox: "Rotation", notes: "" },
+    PropDoc { css: "scale", group: Group::Position, roblox: "UIScale (::UIScale)", notes: "one factor for both axes" },
     PropDoc { css: "z-index", group: Group::Position, roblox: "ZIndex", notes: "" },
     PropDoc {
         css: "margin",
@@ -605,6 +632,8 @@ fn unknown_hint(css: &str) -> Option<&'static str> {
 pub fn translate(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics) -> Translated {
     let mut out = Translated::default();
     warn_disabled_and_unknown(decls, opts, diag);
+    let (decls, scaled_text) = desugar(decls, opts, diag);
+    let decls = &decls[..];
     if opts.strict {
         warn_layout_differences(decls, opts, diag);
     }
@@ -626,6 +655,12 @@ pub fn translate(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics) -
     }
     if opts.groups.contains(&Group::Text) {
         translate_text(decls, diag, &mut out);
+        if let Some((lower, upper)) = scaled_text {
+            scale_text(lower, upper, &mut out);
+        }
+    }
+    if opts.groups.contains(&Group::Color) {
+        translate_images(decls, diag, &mut out);
     }
     if opts.groups.contains(&Group::Size) {
         translate_size(decls, opts, diag, &mut out);
@@ -648,6 +683,198 @@ pub fn translate(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics) -
     }
 
     out
+}
+
+/// Rewrites CSS that the translators below understand in another form: `currentColor`, the
+/// standalone `translate`/`rotate`/`scale` properties, and `min()`/`max()`/`clamp()` sizes. A
+/// `clamp()` font size around a size Roblox can't express (`2vw`) becomes text scaled to fit its
+/// box between the two bounds, returned as the second value.
+fn desugar(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics) -> (Vec<Decl>, Option<(f64, f64)>) {
+    let mut out: Vec<Decl> = match last(decls, "color").map(|d| d.value.clone()) {
+        Some(color) => {
+            decls.iter().map(|d| Decl { value: replace_current_color(&d.value, &color), ..d.clone() }).collect()
+        }
+        None => decls.to_vec(),
+    };
+    let is_none = |v: &Value| v.as_str().is_some_and(|s| s.eq_ignore_ascii_case("none"));
+    let px = |v: &Value| v.as_number().and_then(length_px);
+
+    // CSS applies `translate`, then `rotate`, then `scale`, then `transform`.
+    if opts.groups.contains(&Group::Position) {
+        let mut functions = Vec::new();
+        let mut span = None;
+        for name in ["translate", "rotate", "scale"] {
+            let Some(d) = last(&out, name).filter(|d| !is_none(&d.value)) else { continue };
+            let mut args = space_items(&d.value);
+            if name == "rotate" {
+                // `rotate: z 45deg` names the axis first; Roblox only rotates in the plane.
+                args = args.split_off(args.len() - 1);
+            }
+            functions.push(Value::Call { name: name.to_string(), args });
+            span = span.or(d.span.clone());
+        }
+        if !functions.is_empty() {
+            if let Some(t) = last(&out, "transform").filter(|t| !is_none(&t.value)) {
+                functions.extend(space_items(&t.value));
+            }
+            out.push(Decl { name: "transform".into(), value: Value::list(functions, ListSep::Space), span });
+        }
+    }
+
+    // `width: min(100%, 300px)` is a percentage capped at 300px: a size and a UISizeConstraint.
+    if opts.groups.contains(&Group::Size) {
+        for (axis, min_name, max_name) in [("width", "min-width", "max-width"), ("height", "min-height", "max-height")]
+        {
+            let Some(d) = last(&out, axis).cloned() else { continue };
+            let Value::Call { name, args } = &d.value else { continue };
+            if !matches!(name.as_str(), "min" | "max" | "clamp") {
+                continue;
+            }
+            let fixed: Vec<f64> = args.iter().filter_map(px).collect();
+            let relative: Vec<&Value> = args.iter().filter(|a| px(a).is_none()).collect();
+            let (size, lower, upper) = match (name.as_str(), relative.as_slice()) {
+                ("min", []) => (Value::num_unit(fixed.iter().copied().fold(f64::INFINITY, f64::min), "px"), None, None),
+                ("max", []) => {
+                    (Value::num_unit(fixed.iter().copied().fold(f64::NEG_INFINITY, f64::max), "px"), None, None)
+                }
+                ("clamp", []) if fixed.len() == 3 => {
+                    (Value::num_unit(fixed[0].max(fixed[1].min(fixed[2])), "px"), None, None)
+                }
+                ("min", [r]) => ((*r).clone(), None, fixed.iter().copied().reduce(f64::min)),
+                ("max", [r]) => ((*r).clone(), fixed.iter().copied().reduce(f64::max), None),
+                ("clamp", [r]) if args.len() == 3 && px(&args[0]).is_some() && px(&args[2]).is_some() => {
+                    ((*r).clone(), px(&args[0]), px(&args[2]))
+                }
+                _ => {
+                    diag.warn(
+                        format!(
+                            "`{axis}: {}`: only one bound of a min()/max()/clamp() can be relative (ignored)",
+                            d.value.to_css().unwrap_or_else(|_| d.value.inspect())
+                        ),
+                        d.span.as_ref(),
+                    );
+                    out.retain(|o| o.name != axis);
+                    continue;
+                }
+            };
+            let existing = |out: &[Decl], name: &str| last(out, name).and_then(|d| px(&d.value));
+            let lower = lower.map(|l| existing(&out, min_name).map_or(l, |e| e.max(l)));
+            let upper = upper.map(|u| existing(&out, max_name).map_or(u, |e| e.min(u)));
+            out.push(Decl { name: axis.into(), value: size, span: d.span.clone() });
+            if let Some(l) = lower {
+                out.push(Decl { name: min_name.into(), value: Value::num_unit(l, "px"), span: d.span.clone() });
+            }
+            if let Some(u) = upper {
+                out.push(Decl { name: max_name.into(), value: Value::num_unit(u, "px"), span: d.span.clone() });
+            }
+        }
+    }
+
+    let mut scaled = None;
+    if opts.groups.contains(&Group::Text)
+        && let Some(d) = last(&out, "font-size").cloned()
+        && let Value::Call { name, args } = &d.value
+        && name == "clamp"
+        && let [lo, mid, hi] = args.as_slice()
+        && let (Some(lo), Some(hi)) = (px(lo), px(hi))
+    {
+        let size = match px(mid) {
+            Some(mid) => lo.max(mid.min(hi)),
+            None => {
+                scaled = Some((lo, hi));
+                hi
+            }
+        };
+        out.push(Decl { name: "font-size".into(), value: Value::num_unit(size, "px"), span: d.span.clone() });
+    }
+    (out, scaled)
+}
+
+/// `currentColor` anywhere in `v`, replaced by the rule's `color`.
+fn replace_current_color(v: &Value, color: &Value) -> Value {
+    match v {
+        Value::Str { text, quoted: false } if text.eq_ignore_ascii_case("currentcolor") => color.clone(),
+        Value::List { items, sep, bracketed } => Value::List {
+            items: items.iter().map(|i| replace_current_color(i, color)).collect(),
+            sep: *sep,
+            bracketed: *bracketed,
+        },
+        Value::Call { name, args } => {
+            Value::Call { name: name.clone(), args: args.iter().map(|a| replace_current_color(a, color)).collect() }
+        }
+        _ => v.clone(),
+    }
+}
+
+/// Text that scales to fit its box, between two font sizes: TextScaled with a
+/// UITextSizeConstraint. TextSize already holds the upper bound in Roblox units.
+fn scale_text(lower: f64, upper: f64, out: &mut Translated) {
+    let max = match out.props.iter().find(|(k, _)| k == "TextSize") {
+        Some((_, luau::Value::Number(n))) => *n,
+        _ => upper,
+    };
+    out.set_prop("TextScaled", luau::Value::Bool(true));
+    out.set_pseudo_prop("UITextSizeConstraint", "MinTextSize", luau::Value::Number((lower * max / upper).round()));
+    out.set_pseudo_prop("UITextSizeConstraint", "MaxTextSize", luau::Value::Number(max.round()));
+}
+
+/// How an ImageLabel/ImageButton draws its Image: `object-fit`, `background-size` and
+/// `background-repeat` choose the ScaleType, `image-rendering` the ResampleMode.
+fn translate_images(decls: &[Decl], diag: &mut Diagnostics, out: &mut Translated) {
+    let keyword = |d: &Decl| d.value.as_str().map(str::to_ascii_lowercase);
+    let scale_type = |t: &str| luau::Value::enum_item("ScaleType", t);
+    if let Some(d) = last(decls, "object-fit") {
+        match keyword(d).as_deref() {
+            Some("fill") => out.set_prop("ScaleType", scale_type("Stretch")),
+            Some("contain" | "scale-down") => out.set_prop("ScaleType", scale_type("Fit")),
+            Some("cover") => out.set_prop("ScaleType", scale_type("Crop")),
+            _ => diag.warn("`object-fit` has no Roblox equivalent for this value (ignored)", d.span.as_ref()),
+        }
+    }
+    let no_repeat = last(decls, "background-repeat").and_then(keyword).is_some_and(|k| k == "no-repeat");
+    if let Some(d) = last(decls, "background-size") {
+        match keyword(d).as_deref() {
+            Some("cover") => out.set_prop("ScaleType", scale_type("Crop")),
+            Some("contain") => out.set_prop("ScaleType", scale_type("Fit")),
+            Some("auto") => {}
+            _ => {
+                let items = space_items(&d.value);
+                let axis = |v: &Value| match v.as_number() {
+                    Some(n) => length_component(n).ok(),
+                    None => None,
+                };
+                let x = items.first().and_then(axis);
+                let y = items.get(1).map_or(x, axis);
+                match (x, y) {
+                    (Some((1.0, 0.0)), Some((1.0, 0.0))) => out.set_prop("ScaleType", scale_type("Stretch")),
+                    (Some(_), Some(_)) if no_repeat => {
+                        diag.warn(
+                            "`background-size` without repeating stretches the image to the element (Roblox can't \
+                             draw it once at a size)",
+                            d.span.as_ref(),
+                        );
+                        out.set_prop("ScaleType", scale_type("Stretch"));
+                    }
+                    (Some((xs, xo)), Some((ys, yo))) => {
+                        out.set_prop("ScaleType", scale_type("Tile"));
+                        out.set_prop("TileSize", luau::Value::udim2(xs, xo, ys, yo));
+                    }
+                    _ => diag.warn("`background-size`: expected cover, contain or a size (ignored)", d.span.as_ref()),
+                }
+            }
+        }
+    }
+    if let Some(d) = last(decls, "image-rendering") {
+        match keyword(d).as_deref() {
+            Some("pixelated" | "crisp-edges") => {
+                out.set_prop("ResampleMode", luau::Value::enum_item("ResamplerMode", "Pixelated"))
+            }
+            Some("auto" | "smooth" | "high-quality") => {
+                out.set_prop("ResampleMode", luau::Value::enum_item("ResamplerMode", "Default"))
+            }
+            _ => diag.warn("`image-rendering` has no Roblox equivalent for this value (ignored)", d.span.as_ref()),
+        }
+    }
 }
 
 /// `--strict`: CSS that compiles, but that Roblox lays out differently from a browser. Each warning
@@ -3951,6 +4178,8 @@ pub(crate) fn css_property_targets(name: &str) -> Vec<&'static str> {
         "left" | "top" | "right" | "bottom" | "inset" => vec!["Position", "Size"],
         "width" | "height" => vec!["Size"],
         "transform" => vec!["Rotation", "Position", "AnchorPoint"],
+        "translate" => vec!["Position", "AnchorPoint"],
+        "rotate" => vec!["Rotation"],
         "font-size" => vec!["TextSize"],
         "z-index" => vec!["ZIndex"],
         _ => Vec::new(),
@@ -3966,7 +4195,7 @@ pub(crate) fn css_pseudo_targets(name: &str) -> Vec<(&'static str, &'static str)
         ("UIPadding", "PaddingLeft"),
     ];
     match name {
-        "transform" => vec![("UIScale", "Scale")],
+        "transform" | "scale" => vec![("UIScale", "Scale")],
         "opacity" => vec![("UIStroke", "Transparency")],
         "border" | "outline" => {
             vec![("UIStroke", "Color"), ("UIStroke", "Thickness"), ("UIStroke", "Transparency")]

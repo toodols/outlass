@@ -11,9 +11,12 @@
   border: none;
 }
 
-Frame {
-  @extend %reset;
-  BackgroundColor3: var(--Surface);
+// Layered styles lose to unlayered ones, whatever their specificity.
+@layer base {
+  Frame {
+    @extend %reset;
+    BackgroundColor3: var(--Surface);
+  }
 }
 
 .card {
@@ -58,7 +61,6 @@ TextButton {
 }
 
 .modal {
-  @priority 100;
   position: absolute;
   left: 50%;
   top: 50%;

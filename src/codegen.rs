@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 
 use crate::approx::{self, ApproxOptions, Decl};
 use crate::diag::Diagnostics;
-use crate::eval::{OutRule, Sheet, Token};
+use crate::eval::{OutDecl, OutRule, Sheet, Token};
 use crate::luau::{self, Rule};
 use crate::query::Target;
 use crate::roblox::{self, ValueOptions};
@@ -108,16 +108,92 @@ fn inline_tokens(sheet: &Sheet) -> HashMap<String, Value> {
         .tokens
         .iter()
         .filter(|t| !redefined.contains(&t.name.as_str()))
-        .filter_map(|t| {
-            let v = token_value(&t.value, &t.name, &mut Diagnostics::default(), &t.span);
-            let v = match &v {
-                // Kept as text for the attribute; the declaration needs the value itself.
-                Value::Str { text, quoted: true } => crate::eval::evaluate_expression(text).unwrap_or(v),
-                _ => v,
-            };
-            (!matches!(&v, Value::Color(c) if c.a >= 1.0)).then(|| (t.name.clone(), v))
-        })
+        .filter_map(|t| inline_value(t).map(|v| (t.name.clone(), v)))
         .collect()
+}
+
+/// A token's value to compile into the declarations that use it, or `None` for an opaque colour,
+/// which stays a `"$Name"` reference (see inline_tokens).
+fn inline_value(t: &Token) -> Option<Value> {
+    let v = token_value(&t.value, &t.name, &mut Diagnostics::default(), &t.span);
+    let v = match &v {
+        // Kept as text for the attribute; the declaration needs the value itself.
+        Value::Str { text, quoted: true } => crate::eval::evaluate_expression(text).unwrap_or(v),
+        _ => v,
+    };
+    (!matches!(&v, Value::Color(c) if c.a >= 1.0)).then_some(v)
+}
+
+/// The tokens rule `index`'s CSS declarations can compile in: the `:root` ones, overridden by
+/// those set on weaker rules for the same elements and on the rule itself, as CSS would cascade
+/// them.
+fn rule_tokens(sheet: &Sheet, index: usize, root: &HashMap<String, Value>) -> HashMap<String, Value> {
+    let mut tokens = root.clone();
+    for i in weaker_rules(sheet, index).into_iter().chain([index]) {
+        for t in &sheet.rules[i].tokens {
+            match inline_value(t) {
+                Some(v) => tokens.insert(t.name.clone(), v),
+                None => tokens.remove(&t.name),
+            };
+        }
+    }
+    tokens
+}
+
+/// The declarations of weaker rules for the same elements that use a token this rule sets. CSS
+/// resolves `var()` for each element, so `.a.b { --gap: 10px }` changes the padding that
+/// `.a { padding: var(--gap) }` gives it; a compiled-in value has to be compiled again for `.a.b`.
+fn redefined_token_uses(sheet: &Sheet, index: usize, tokens: &HashMap<String, Value>) -> Vec<OutDecl> {
+    fn uses(v: &Value, names: &[&str]) -> bool {
+        match v {
+            Value::Call { name, args } if name == "var" => {
+                args.first()
+                    .and_then(|a| a.as_str())
+                    .and_then(|a| a.strip_prefix("--"))
+                    .is_some_and(|t| names.contains(&t))
+                    || args.iter().skip(1).any(|a| uses(a, names))
+            }
+            Value::Call { args, .. } => args.iter().any(|a| uses(a, names)),
+            Value::List { items, .. } => items.iter().any(|i| uses(i, names)),
+            _ => false,
+        }
+    }
+    let names: Vec<&str> =
+        sheet.rules[index].tokens.iter().map(|t| t.name.as_str()).filter(|n| tokens.contains_key(*n)).collect();
+    if names.is_empty() {
+        return Vec::new();
+    }
+    weaker_rules(sheet, index)
+        .into_iter()
+        .flat_map(|i| sheet.rules[i].decls.iter())
+        .filter(|d| is_css_property(&d.name) && uses(&d.value, &names))
+        .cloned()
+        .collect()
+}
+
+/// `@font-face` names in `font-family` and `font` replaced by the font assets they stand for.
+fn with_font_faces(sheet: &Sheet) -> Sheet {
+    fn substitute(v: &Value, faces: &[(String, String)]) -> Value {
+        match v {
+            Value::Str { text, .. } => match faces.iter().rev().find(|(name, _)| name.eq_ignore_ascii_case(text)) {
+                Some((_, asset)) => Value::quoted(asset.clone()),
+                None => v.clone(),
+            },
+            Value::List { items, sep, bracketed } => Value::List {
+                items: items.iter().map(|i| substitute(i, faces)).collect(),
+                sep: *sep,
+                bracketed: *bracketed,
+            },
+            _ => v.clone(),
+        }
+    }
+    let mut out = sheet.clone();
+    for decl in out.rules.iter_mut().flat_map(|r| r.decls.iter_mut()) {
+        if decl.name == "font-family" || decl.name == "font" {
+            decl.value = substitute(&decl.value, &sheet.font_faces);
+        }
+    }
+    out
 }
 
 /// Substitutes the inlined tokens' values for their `var()` references, anywhere in `v`.
@@ -257,6 +333,17 @@ fn check_fractional_grids(sheet: &Sheet, diag: &mut Diagnostics) {
 /// The declarations that apply to rule `index`'s elements from weaker rules matching all of them
 /// (`.bar` for `.bar.left`), in cascade order, keeping the properties `keep` names.
 fn weaker_decls(sheet: &Sheet, index: usize, keep: impl Fn(&str) -> bool) -> Vec<Decl> {
+    weaker_rules(sheet, index)
+        .into_iter()
+        .flat_map(|i| sheet.rules[i].decls.iter())
+        .filter(|d| keep(&d.name))
+        .map(to_decl)
+        .collect()
+}
+
+/// The rules that apply to all of rule `index`'s elements and lose to it in the cascade, weakest
+/// first (`.bar` for `.bar.left`).
+fn weaker_rules(sheet: &Sheet, index: usize) -> Vec<usize> {
     let rule = &sheet.rules[index];
     let mut weaker: Vec<(usize, &OutRule)> = sheet
         .rules
@@ -274,7 +361,7 @@ fn weaker_decls(sheet: &Sheet, index: usize, keep: impl Fn(&str) -> bool) -> Vec
         .collect();
     // Cascade order: lower specificity first, then source order.
     weaker.sort_by_key(|(i, other)| (other.selector.specificity(), *i));
-    weaker.into_iter().flat_map(|(_, other)| other.decls.iter()).filter(|d| keep(&d.name)).map(to_decl).collect()
+    weaker.into_iter().map(|(i, _)| i).collect()
 }
 
 fn to_decl(d: &crate::eval::OutDecl) -> Decl {
@@ -387,13 +474,26 @@ fn check_block_children_without_width(sheet: &Sheet, diag: &mut Diagnostics) {
 
 /// Converts evaluated rules into the Roblox StyleRule tree.
 pub fn lower(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -> luau::Sheet {
+    let substituted;
+    let sheet = if sheet.font_faces.is_empty() {
+        sheet
+    } else {
+        substituted = with_font_faces(sheet);
+        &substituted
+    };
     let sheet_attributes = attributes(&sheet.tokens, &opts.values, diag);
 
     let mut rules: Vec<Rule> = Vec::new();
     let hides_anything = sheet.rules.iter().any(|r| r.decls.iter().any(hides));
     let parts = cascade_parts(sheet);
-    let priorities = cascade_priorities(sheet, &parts);
-    let tokens = inline_tokens(sheet);
+    let mut priorities = cascade_priorities(sheet, &parts);
+    let root_tokens = inline_tokens(sheet);
+    let inherited_text = inherited_text_rules(sheet, &priorities, &root_tokens, opts);
+    // Inherited values rank above the user-agent defaults (0) and below every author rule.
+    let offset = inherited_text.len() as f64;
+    for p in priorities.values_mut() {
+        *p = p.map(|p| p + offset);
+    }
     if opts.approx.strict && opts.approx.groups.contains(&approx::Group::Size) {
         check_percentages_under_content(sheet, diag);
     }
@@ -408,14 +508,33 @@ pub fn lower(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -> lu
         if rule.selector.0.is_empty() || rule.query {
             continue;
         }
-        let selector = rule.selector.to_roblox(diag, Some(&rule.span));
         // Rules inside @media / @container / @Query get the query's `@Name` prefix, once per alternative.
         let prefixes: Vec<Option<String>> = match rule.parent {
             Some(container) => sheet.rules[container].queries.iter().map(|q| Some(q.name())).collect(),
             None => vec![None],
         };
+        let tokens = rule_tokens(sheet, idx, &root_tokens);
+        if let Some(base) = rule.selector.strip_pseudo_element("placeholder") {
+            let priority = priorities.get(&(idx, false)).or(priorities.get(&(idx, true))).copied().flatten();
+            let selector = base.to_roblox(diag, Some(&rule.span));
+            let props = placeholder_props(rule, &tokens, opts, diag);
+            for prefix in &prefixes {
+                let selector = match prefix {
+                    Some(name) => prefix_selector(&selector, &format!("@{name} ")),
+                    None => selector.clone(),
+                };
+                rules.push(Rule { selector, priority, props: props.clone(), ..Default::default() });
+            }
+            continue;
+        }
+        let selector = rule.selector.to_roblox(diag, Some(&rule.span));
         for (part, important) in &parts[idx] {
             let priority = priorities.get(&(idx, *important)).copied().flatten();
+            let mut part = part.clone();
+            if !important {
+                part.decls.splice(0..0, redefined_token_uses(sheet, idx, &tokens));
+            }
+            let part = &part;
             let inherited = inherited_decls(sheet, idx);
             let mut lowered = lower_rule(part, &inherited, &tokens, selector.clone(), priority, opts, diag);
             if !hides_anything {
@@ -440,6 +559,7 @@ pub fn lower(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -> lu
         }
     }
     drop_unneeded_stroke_resets(&mut rules);
+    rules.splice(0..0, inherited_text);
     let definitions = query_definitions(sheet, diag);
     rules.splice(0..0, definitions);
 
@@ -782,6 +902,9 @@ const COMPOSITE_GROUPS: &[&[&str]] = &[
         "width",
         "height",
         "transform",
+        "translate",
+        "rotate",
+        "scale",
         "margin",
         "margin-top",
         "margin-right",
@@ -855,6 +978,8 @@ const COMPOSITE_GROUPS: &[&[&str]] = &[
         "width",
         "height",
     ],
+    // ScaleType
+    &["object-fit", "background-size", "background-repeat"],
     // ScrollingDirection / AutomaticCanvasSize cover both axes
     &["overflow", "overflow-x", "overflow-y"],
     // transition longhands combine by index
@@ -912,6 +1037,130 @@ fn restrict_to(mut full: approx::Translated, keys: &approx::Translated) -> appro
     }
     full.pseudo_transitions.retain(|(_, props)| !props.is_empty());
     full
+}
+
+/// `::placeholder { color: grey }`: a TextBox's placeholder text, which Roblox colours with
+/// PlaceholderColor3.
+fn placeholder_props(
+    rule: &OutRule,
+    tokens: &HashMap<String, Value>,
+    opts: &CodegenOptions,
+    diag: &mut Diagnostics,
+) -> Vec<(String, luau::Value)> {
+    let mut props = Vec::new();
+    for d in &rule.decls {
+        let name = if d.name == "color" { "PlaceholderColor3" } else { d.name.as_str() };
+        if is_css_property(name) {
+            diag.warn(format!("`{}` has no Roblox equivalent on a placeholder (ignored)", d.name), Some(&d.span));
+            continue;
+        }
+        match roblox::value(&inline_vars(&d.value, tokens), &opts.values) {
+            Ok(v) => set(&mut props, name.to_string(), v),
+            Err(e) => diag.warn(format!("{}: {e} (ignored)", d.name), Some(&d.span)),
+        }
+    }
+    props
+}
+
+/// CSS properties an element's descendants inherit, among those outlass translates to text
+/// properties.
+const INHERITED: &[&str] = &[
+    "color",
+    "text-fill-color",
+    "font",
+    "font-family",
+    "font-size",
+    "font-weight",
+    "font-style",
+    "line-height",
+    "text-align",
+    "white-space",
+    "text-wrap",
+];
+
+/// The text properties inherited declarations become.
+const INHERITED_TEXT_PROPERTIES: &[&str] =
+    &["TextColor3", "TextTransparency", "FontFace", "TextSize", "LineHeight", "TextXAlignment", "TextWrapped"];
+
+fn is_inherited(name: &str) -> bool {
+    INHERITED.contains(&name.strip_prefix("-webkit-").unwrap_or(name))
+}
+
+/// CSS text properties are inherited: `.card { color: white }` colours the text of everything
+/// inside the card. Roblox styles each element on its own, so a rule that sets them also gets a
+/// rule for the text elements under it (`.card >> TextLabel`). Inherited values lose to every
+/// rule that styles the text element itself, so these rank between the user-agent defaults and
+/// the author rules. CSS takes the nearest ancestor's value, which a selector can't express; of
+/// two ancestors' rules, the stronger one wins.
+fn inherited_text_rules(
+    sheet: &Sheet,
+    priorities: &HashMap<(usize, bool), Option<f64>>,
+    root_tokens: &HashMap<String, Value>,
+    opts: &CodegenOptions,
+) -> Vec<Rule> {
+    if !opts.approx.groups.contains(&approx::Group::Text) && !opts.approx.groups.contains(&approx::Group::Color) {
+        return Vec::new();
+    }
+    let mut found: Vec<(f64, Rule)> = Vec::new();
+    for (idx, rule) in sheet.rules.iter().enumerate() {
+        if rule.query || rule.selector.0.is_empty() || !rule.decls.iter().any(|d| is_inherited(&d.name)) {
+            continue;
+        }
+        let tokens = rule_tokens(sheet, idx, root_tokens);
+        let resolve = |d: Decl| Decl { value: inline_vars(&d.value, &tokens), ..d };
+        // Gradient text (`background-clip: text; color: transparent`) only tints the element's
+        // own text in Roblox, so its transparent colour would hide the text inside it.
+        let clips_text = rule.decls.iter().any(|d| {
+            d.name.ends_with("background-clip") && d.value.as_str().is_some_and(|s| s.eq_ignore_ascii_case("text"))
+        });
+        let own: Vec<Decl> = rule
+            .decls
+            .iter()
+            .filter(|d| is_inherited(&d.name) && !(clips_text && d.name.ends_with("color")))
+            .map(to_decl)
+            .map(resolve)
+            .collect();
+        if own.is_empty() {
+            continue;
+        }
+        let mut all: Vec<Decl> = weaker_decls(sheet, idx, is_inherited).into_iter().map(resolve).collect();
+        all.extend(own.iter().cloned());
+        // Warnings were given when the rule itself was translated.
+        let mut silent = Diagnostics::default();
+        let produced = approx::translate(&own, &opts.approx, &mut silent).props;
+        let props: Vec<(String, luau::Value)> = approx::translate(&all, &opts.approx, &mut silent)
+            .props
+            .into_iter()
+            .filter(|(k, _)| INHERITED_TEXT_PROPERTIES.contains(&k.as_str()) && produced.iter().any(|(p, _)| p == k))
+            .collect();
+        if props.is_empty() {
+            continue;
+        }
+        let base = rule.selector.to_roblox(&mut Diagnostics::default(), None);
+        let selector = split_selector_list(&base)
+            .into_iter()
+            .filter(|s| !s.contains("::"))
+            .flat_map(|s| ["TextLabel", "TextButton", "TextBox"].map(|class| format!("{s} >> {class}")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if selector.is_empty() {
+            continue;
+        }
+        let order = priorities.get(&(idx, false)).or(priorities.get(&(idx, true))).copied().flatten().unwrap_or(0.0);
+        let prefixes: Vec<Option<String>> = match rule.parent {
+            Some(container) => sheet.rules[container].queries.iter().map(|q| Some(q.name())).collect(),
+            None => vec![None],
+        };
+        for prefix in prefixes {
+            let selector = match prefix {
+                Some(name) => prefix_selector(&selector, &format!("@{name} ")),
+                None => selector.clone(),
+            };
+            found.push((order, Rule { selector, props: props.clone(), ..Default::default() }));
+        }
+    }
+    found.sort_by(|a, b| a.0.total_cmp(&b.0));
+    found.into_iter().enumerate().map(|(rank, (_, rule))| Rule { priority: Some(rank as f64 + 1.0), ..rule }).collect()
 }
 
 /// Marks a property in `own_only`, which only records which properties a rule produces.
