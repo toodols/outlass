@@ -264,9 +264,9 @@ ignored with a warning that names the flag to enable. Explicit Roblox properties
 
 | Group | Properties | Becomes |
 | --- | --- | --- |
-| `color` | `color`, `background[-color]`, `background-image`, `background-clip`, `background-size`, `background-repeat`, `object-fit`, `image-rendering`, `mask-image`, `scrollbar-color` | `TextColor3`, `BackgroundColor3` + transparency from alpha, `::UIGradient` for `linear-gradient()` and `repeating-linear-gradient()` (Color from the background, Transparency from a mask), gradient text via `background-clip: text`, `Image` for `url()`, `ScaleType` (`cover` → Crop, `contain` → Fit, a `background-size` → Tile + `TileSize`), `ResampleMode` (`pixelated`), `ScrollBarImageColor3` (the thumb; Roblox draws no track) |
+| `color` | `color`, `background[-color]`, `background-image`, `background-clip`, `background-size`, `background-repeat`, `background-blend-mode`, `border-image*`, `object-fit`, `image-rendering`, `mask-image`, `scrollbar-color` | `TextColor3`, `BackgroundColor3` + transparency from alpha, `::UIGradient` for `linear-gradient()` and `repeating-linear-gradient()` (Color from the background, Transparency from a mask), gradient text via `background-clip: text`, `Image` for `url()`, `ScaleType` (`cover` → Crop, `contain` → Fit, a `background-size` → Tile + `TileSize`), `ResampleMode` (`pixelated`), `ScrollBarImageColor3` (the thumb; Roblox draws no track) |
 | `opacity` | `opacity` | `1 - x` into `GroupTransparency` (a CanvasGroup fades with its children, like CSS), `TextTransparency`, `ImageTransparency`, and `BackgroundTransparency` when a background is known (combined with color alpha) |
-| `text` | `font*`, `text-align`, `vertical-align`, `align-content`, `line-height`, `white-space`, `text-overflow`, `-webkit-text-stroke[-width|-color]`, `content` | `FontFace` (the first family in the list that Roblox has; unknown names warn, `rbxassetid://` uploads pass through), `TextSize`, `TextX/YAlignment`, `LineHeight` (+ half-leading `::UIPadding`), `TextWrapped`, `TextTruncate`, `::UIStroke`, `Text` |
+| `text` | `font*`, `text-align`, `vertical-align`, `align-content`, `line-height`, `white-space`, `text-overflow`, `text-shadow`, `-webkit-text-stroke[-width|-color]`, `content` | `FontFace` (the first family in the list that Roblox has; unknown names warn, `rbxassetid://` uploads pass through), `TextSize`, `TextX/YAlignment`, `LineHeight` (+ half-leading `::UIPadding`), `TextWrapped`, `TextTruncate`, `::UIStroke`, `Text` |
 | `size` | `width`, `height`, `min-*`, `max-*`, `aspect-ratio`, `box-sizing` | `Size`/`AutomaticSize`, `::UISizeConstraint`, `::UIAspectRatioConstraint` |
 | `position` | `left/top/right/bottom/inset`, `margin*`, `transform`, `translate`, `rotate`, `scale`, `z-index` | `Position`, `AnchorPoint`, `Rotation`, `::UIScale`, `ZIndex` |
 | `box` | `border-radius`, `padding*`, `border*`, `outline*` | `::UICorner`, `::UIPadding`, `::UIStroke` |
@@ -347,12 +347,22 @@ Text properties are inherited, as in CSS: `color`, `font*`, `line-height`, `text
 `white-space` on `.card` also style every `TextLabel`, `TextButton` and `TextBox` inside it (a
 `.card >> TextLabel` rule). Inherited values lose to any rule that styles the text element itself.
 CSS takes the nearest ancestor's value, which a selector can't express, so between two ancestors' rules
-the stronger one wins.
+the stronger one wins. Set the interface's type on its root, as a page does on its body
+(`ScreenGui { font: 14px "Source Sans Pro" }`): a rule that sets `font-size` or `font-weight` without a
+family is then sized and weighted in that family.
 
 `min()`, `max()` and `clamp()` work on sizes when at most one bound is relative: `width: min(100%, 300px)`
 is a 100% width with a 300px `::UISizeConstraint`. `font-size: clamp(12px, 2vw, 20px)` becomes
 `TextScaled` text between 12 and 20 (a `::UITextSizeConstraint`), since Roblox has no viewport units.
 `currentColor` is the rule's `color`.
+
+Pictures: `background-image: url(...)` is the `Image` (and `none` clears it), `object-fit` and
+`background-size` its `ScaleType`, and `background-blend-mode: multiply` over a `background-color`
+tints it (`ImageColor3`). `border-image: url("rbxassetid://123#96x96") 32 fill` is a 9-slice
+(`ScaleType.Slice` with its `SliceCenter`); Roblox measures the slices in the picture's pixels, so the
+url ends with the picture's size, which a browser ignores and outlass leaves out of the id. Roblox
+always draws the middle, so write `fill`. `border-image-width` scales the slices (`SliceScale`).
+`contain: size` stops an element sizing itself by its content, for one whose size code sets.
 
 `opacity` scales those transparencies rather than replacing them: `.a:hover { opacity: 0.5 }` fades
 the background and border `.a` gives it, and leaves a transparent background transparent. A rule that

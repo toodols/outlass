@@ -514,7 +514,12 @@ fn codegen_options(
 ) -> CodegenOptions {
     let values = ValueOptions { allow_raw_luau: args.allow_raw_luau };
     CodegenOptions {
-        approx: ApproxOptions { groups: Group::expand(&args.approx), strict: args.strict, tokens: HashMap::new() },
+        approx: ApproxOptions {
+            groups: Group::expand(&args.approx),
+            strict: args.strict,
+            tokens: HashMap::new(),
+            inherited_family: None,
+        },
         values,
         sheet_name: sheet_name.to_string(),
         header,

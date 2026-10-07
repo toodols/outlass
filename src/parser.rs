@@ -1497,9 +1497,23 @@ impl Parser {
                     self.pos += 1;
                     text.push(self.escape()?);
                 }
-                Some(c) => {
+                // Whitespace only before the `)`.
+                Some(c) if c.is_whitespace() => {
+                    self.skip_ws_only();
+                    if self.peek() != Some(')') {
+                        self.pos = save;
+                        return Ok(None);
+                    }
+                }
+                // What an unquoted URL can hold. Anything else (`url($picture)`, `url(nth($list, 1))`) makes `url()` an
+                // ordinary function call, as in Sass.
+                Some(c) if matches!(c, '!' | '#' | '%' | '&' | '*'..='~') || !c.is_ascii() => {
                     text.push(c);
                     self.pos += 1;
+                }
+                Some(_) => {
+                    self.pos = save;
+                    return Ok(None);
                 }
             }
         }

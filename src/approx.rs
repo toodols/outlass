@@ -115,6 +115,9 @@ pub struct ApproxOptions {
     /// (`"$radius"`), so a theme can change them: token name → its value. Codegen leaves their
     /// `var()`s in those declarations.
     pub tokens: HashMap<String, Value>,
+    /// The font family text inherits from the interface's root (`ScreenGui { font-family: ... }`):
+    /// what a rule that names no family sizes its `font-size` by and keeps its weight in.
+    pub inherited_family: Option<String>,
     /// Already expanded (no `All`).
     pub groups: Vec<Group>,
     /// Warn about CSS that compiles to a different layout than a browser gives it (`--strict`).
@@ -235,6 +238,27 @@ pub static PROPERTIES: &[PropDoc] = &[
         notes: "for an image: no-repeat with a background-size stretches instead of tiling",
     },
     PropDoc {
+        css: "border-image",
+        group: Group::Color,
+        roblox: "Image, ScaleType.Slice, SliceCenter, SliceScale",
+        notes: "a 9-slice: `border-image: url(\"rbxassetid://…#96x96\") 32 fill`. Roblox measures the slices in the \
+                picture's pixels, so the url ends with its size (a browser ignores it); Roblox always draws the middle",
+    },
+    PropDoc { css: "border-image-source", group: Group::Color, roblox: "Image", notes: "see border-image" },
+    PropDoc { css: "border-image-slice", group: Group::Color, roblox: "SliceCenter", notes: "see border-image" },
+    PropDoc {
+        css: "border-image-width",
+        group: Group::Color,
+        roblox: "SliceScale",
+        notes: "the slices drawn at this width rather than the picture's own",
+    },
+    PropDoc {
+        css: "background-blend-mode",
+        group: Group::Color,
+        roblox: "ImageColor3",
+        notes: "`multiply` over a picture tints it with the background color",
+    },
+    PropDoc {
         css: "object-fit",
         group: Group::Color,
         roblox: "ScaleType",
@@ -339,6 +363,13 @@ pub static PROPERTIES: &[PropDoc] = &[
     PropDoc { css: "text-overflow", group: Group::Text, roblox: "TextTruncate", notes: "" },
     PropDoc { css: "content", group: Group::Text, roblox: "Text", notes: "a string; replaces the element's text" },
     PropDoc {
+        css: "text-shadow",
+        group: Group::Text,
+        roblox: "TextStrokeColor3, TextStrokeTransparency",
+        notes: "Roblox's own text stroke, an outline as thin as `0 0 1px`; it has no offset or blur. \
+                (`-webkit-text-stroke` is a UIStroke instead, of any width)",
+    },
+    PropDoc {
         css: "-webkit-text-stroke",
         group: Group::Text,
         roblox: "UIStroke (::UIStroke)",
@@ -353,6 +384,12 @@ pub static PROPERTIES: &[PropDoc] = &[
     },
     PropDoc { css: "-webkit-text-stroke-color", group: Group::Text, roblox: "UIStroke.Color (::UIStroke)", notes: "" },
     // size
+    PropDoc {
+        css: "contain",
+        group: Group::Size,
+        roblox: "AutomaticSize",
+        notes: "`size` (or `strict`): the size doesn't come from the content, for an element sized by code",
+    },
     PropDoc {
         css: "box-sizing",
         group: Group::Size,
@@ -630,7 +667,7 @@ fn unknown_hint(css: &str) -> Option<&'static str> {
     match strip_vendor_prefix(css) {
         "text-decoration" | "text-decoration-line" => Some("use RichText <u>/<s> tags"),
         "text-transform" => Some("transform the text itself, or wrap it in RichText <uc>/<sc> tags"),
-        "text-shadow" | "box-shadow" => Some("use a UIStroke or a shadow ImageLabel"),
+        "box-shadow" => Some("use a UIStroke or a shadow ImageLabel"),
         // `letter-spacing`, `word-spacing` and `cursor` have nothing to point at: Roblox has no
         // property and no rich-text attribute for them. The bare warning already says so.
         "float" | "clear" => Some("use layout properties instead"),
@@ -670,7 +707,7 @@ pub fn translate(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics) -
         translate_color_opacity(decls, opts, opacity_factor, diag, &mut out);
     }
     if opts.groups.contains(&Group::Text) {
-        translate_text(decls, diag, &mut out);
+        translate_text(decls, opts.inherited_family.as_deref(), diag, &mut out);
         if let Some(d) = last(decls, "overflow-wrap").or_else(|| last(decls, "word-wrap"))
             && d.value.as_str().is_some_and(|s| s.eq_ignore_ascii_case("normal"))
         {
@@ -888,6 +925,7 @@ fn translate_images(decls: &[Decl], diag: &mut Diagnostics, out: &mut Translated
             }
         }
     }
+    translate_border_image(decls, diag, out);
     if let Some(d) = last(decls, "image-rendering") {
         match keyword(d).as_deref() {
             Some("pixelated" | "crisp-edges") => {
@@ -898,6 +936,96 @@ fn translate_images(decls: &[Decl], diag: &mut Diagnostics, out: &mut Translated
             }
             _ => diag.warn("`image-rendering` has no Roblox equivalent for this value (ignored)", d.span.as_ref()),
         }
+    }
+}
+
+/// `border-image: url("…#96x96") 32 fill`: a 9-slice. The shorthand resets its longhands, which
+/// can then override it (a `:hover` rule that only swaps the source).
+fn translate_border_image(decls: &[Decl], diag: &mut Diagnostics, out: &mut Translated) {
+    let mut source: Option<(Value, Option<Span>)> = None;
+    let mut slice: Option<Vec<Value>> = None;
+    let mut width: Option<Value> = None;
+    let mut seen = false;
+    for d in decls {
+        match strip_vendor_prefix(&d.name) {
+            "border-image" => {
+                seen = true;
+                let items = space_items(&d.value);
+                source = items
+                    .iter()
+                    .find(|v| {
+                        matches!(v, Value::Call { .. }) || v.as_str().is_some_and(|s| s.eq_ignore_ascii_case("none"))
+                    })
+                    .map(|v| (v.clone(), d.span.clone()));
+                let rest: Vec<Value> = items.into_iter().filter(|v| !matches!(v, Value::Call { .. })).collect();
+                slice = Some(rest);
+                width = None;
+            }
+            "border-image-source" => {
+                seen = true;
+                source = Some((d.value.clone(), d.span.clone()));
+            }
+            "border-image-slice" => {
+                seen = true;
+                slice = Some(space_items(&d.value));
+            }
+            "border-image-width" => {
+                seen = true;
+                width = Some(d.value.clone());
+            }
+            _ => {}
+        }
+    }
+    if !seen {
+        return;
+    }
+    let Some((source, span)) = source else { return };
+    let url = match &source {
+        Value::Call { name, args } if name == "url" => args.first().and_then(|a| a.as_str()).map(picture),
+        v if v.as_str().is_some_and(|s| s.eq_ignore_ascii_case("none")) => {
+            out.set_prop("Image", luau::Value::String(String::new()));
+            return;
+        }
+        _ => None,
+    };
+    let Some((id, size)) = url else {
+        diag.warn("`border-image`: expected a url() (ignored)", span.as_ref());
+        return;
+    };
+    out.set_prop("Image", luau::Value::String(id));
+    let slice = slice.unwrap_or_default();
+    let fill = slice.iter().any(|v| v.as_str().is_some_and(|s| s.eq_ignore_ascii_case("fill")));
+    let numbers: Vec<&Number> = slice.iter().filter_map(Value::as_number).collect();
+    if numbers.is_empty() {
+        // CSS's initial slice is 100%: the corners are the whole picture, stretched.
+        out.set_prop("ScaleType", luau::Value::enum_item("ScaleType", "Stretch"));
+        return;
+    }
+    let Some((w, h)) = size else {
+        diag.warn(
+            "`border-image`: Roblox measures the slices in the picture's pixels, so end its url with its size, as in \
+             url(\"rbxassetid://123#96x96\") (ignored)",
+            span.as_ref(),
+        );
+        return;
+    };
+    if !fill {
+        diag.warn("`border-image`: Roblox always draws the middle of a sliced picture; add `fill`", span.as_ref());
+    }
+    // top, right, bottom, left, in the picture's pixels (a percentage is of its size)
+    let side = |i: usize, extent: f64| {
+        let n = numbers[[[0, 0, 0, 0], [0, 1, 0, 1], [0, 1, 2, 1], [0, 1, 2, 3]][numbers.len().min(4) - 1][i]];
+        if n.has_unit("%") { n.value / 100.0 * extent } else { n.value }
+    };
+    let (top, right, bottom, left) = (side(0, h), side(1, w), side(2, h), side(3, w));
+    out.set_prop("ScaleType", luau::Value::enum_item("ScaleType", "Slice"));
+    out.set_prop("SliceCenter", luau::Value::Rect(left, top, w - right, h - bottom));
+    if let Some(v) = &width
+        && let Some(n) = v.as_number()
+        && let Some(px) = length_px(n)
+        && top > 0.0
+    {
+        out.set_prop("SliceScale", luau::Value::Number(px / top));
     }
 }
 
@@ -965,7 +1093,7 @@ fn warn_layout_differences(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diag
     }
 
     if opts.groups.contains(&Group::Text) {
-        let m = text_metrics(decls);
+        let m = text_metrics(decls, opts.inherited_family.as_deref());
         if m.size.is_some() && m.family_ratio.is_none() {
             let d = decls.iter().rev().find(|d| matches!(d.name.as_str(), "font-size" | "font"));
             diag.error(
@@ -1427,12 +1555,18 @@ fn translate_color_opacity(
             }
         }
 
-        if let Some(d) = bg_image_decl
-            && let Some(Value::Call { name, args }) = layers(&d.value).first()
-            && name == "url"
-            && let Some(text) = args.first().and_then(|a| a.as_str())
-        {
-            out.set_prop("Image", luau::Value::String(text.to_string()));
+        if let Some(d) = bg_image_decl {
+            match layers(&d.value).first() {
+                Some(Value::Call { name, args }) if name == "url" => {
+                    if let Some(text) = args.first().and_then(|a| a.as_str()) {
+                        out.set_prop("Image", luau::Value::String(picture(text).0));
+                    }
+                }
+                Some(v) if v.as_str().is_some_and(|s| s.eq_ignore_ascii_case("none")) => {
+                    out.set_prop("Image", luau::Value::String(String::new()));
+                }
+                _ => {}
+            }
         }
 
         if let Some(d) = last(decls, "mask-image").or_else(|| last(decls, "mask")) {
@@ -1538,6 +1672,19 @@ fn translate_color_opacity(
         out.set_prop("BackgroundTransparency", luau::Value::Number(compute_transparency(bg_alpha, opacity_factor)));
     }
 
+    // `background-blend-mode: multiply` under a picture: the picture times the color, which is what
+    // ImageColor3 draws. The color isn't seen around the picture, which covers the element.
+    if color_on
+        && last(decls, "background-blend-mode")
+            .is_some_and(|d| d.value.as_str().is_some_and(|s| s.eq_ignore_ascii_case("multiply")))
+        && has_picture(decls)
+        && let Some(i) = out.props.iter().position(|(k, _)| k == "BackgroundColor3")
+    {
+        let (_, color) = out.props.remove(i);
+        out.set_prop("ImageColor3", color);
+        out.set_prop("BackgroundTransparency", luau::Value::Number(1.0));
+    }
+
     if opacity_on && let Some(of) = opacity_factor {
         let t = luau::Value::Number((1.0 - of).clamp(0.0, 1.0));
         // ImageTransparency: only opacity drives this (no "image color" concept in CSS).
@@ -1545,6 +1692,24 @@ fn translate_color_opacity(
         // On a CanvasGroup this fades the element and its children together, exactly like CSS opacity.
         out.set_prop("GroupTransparency", t);
     }
+}
+
+/// Whether the element draws a picture: a `url()` background or a border image.
+fn has_picture(decls: &[Decl]) -> bool {
+    let url = |d: &Decl| space_items(&d.value).iter().any(|v| matches!(v, Value::Call { name, .. } if name == "url"));
+    ["background-image", "border-image", "border-image-source"].iter().any(|n| last(decls, n).is_some_and(url))
+}
+
+/// A picture's url, and the size its `#WxH` ending gives (`rbxassetid://123#96x96`), which Roblox
+/// doesn't take as part of the id.
+fn picture(url: &str) -> (String, Option<(f64, f64)>) {
+    if let Some((id, size)) = url.rsplit_once('#')
+        && let Some((w, h)) = size.split_once('x')
+        && let (Ok(w), Ok(h)) = (w.parse::<f64>(), h.parse::<f64>())
+    {
+        return (id.to_string(), Some((w, h)));
+    }
+    (url.to_string(), None)
 }
 
 fn direction_to_angle(dir: &[String]) -> f64 {
@@ -2099,6 +2264,28 @@ const FAMILY_LINE_RATIOS: &[(&str, f64)] = &[
     ("Zekton", 1.2),
 ];
 
+/// The font family `decls` name (in `font-family` or the `font` shorthand), as its asset.
+pub fn declared_family(decls: &[Decl]) -> Option<String> {
+    let mut family = None;
+    for d in decls {
+        match strip_vendor_prefix(&d.name) {
+            "font-family" => {
+                let families = family_texts(&d.value);
+                if !families.is_empty() {
+                    family = Some(resolve_families(&families, &mut Diagnostics::default(), None));
+                }
+            }
+            "font" => {
+                if let Ok((_, _, fam, _, _)) = parse_font_shorthand(&d.value, &mut Diagnostics::default(), None) {
+                    family = fam.or(family);
+                }
+            }
+            _ => {}
+        }
+    }
+    family
+}
+
 /// The line-height-to-em ratio of a resolved font asset, when it's a built-in family outlass knows.
 fn family_line_ratio(asset: &str) -> Option<f64> {
     let stem = asset.strip_prefix(FAMILIES_PREFIX)?.strip_suffix(".json")?;
@@ -2320,7 +2507,7 @@ impl TextMetrics {
     }
 }
 
-fn text_metrics(decls: &[Decl]) -> TextMetrics {
+fn text_metrics(decls: &[Decl], inherited: Option<&str>) -> TextMetrics {
     enum LineHeight {
         Ratio(f64),
         /// Resolved against the final font size.
@@ -2367,7 +2554,8 @@ fn text_metrics(decls: &[Decl]) -> TextMetrics {
         Some(LineHeight::Px(px)) => size.filter(|s| *s > 0.0).map(|s| px / s),
         _ => None,
     };
-    let family = family.or_else(|| any_font.then(|| DEFAULT_FONT.to_string()));
+    let family =
+        family.or_else(|| inherited.map(str::to_string)).or_else(|| any_font.then(|| DEFAULT_FONT.to_string()));
     TextMetrics { size, line_height: ratio, family_ratio: family.as_deref().and_then(family_line_ratio) }
 }
 
@@ -2377,14 +2565,55 @@ fn text_metrics(decls: &[Decl]) -> TextMetrics {
 /// (top, bottom) padding for that, when both are known. Roblox rounds padding to whole pixels, so
 /// the leading is split into whole pixels that add up to it (a -3px leading as -1.5 each would
 /// lose a pixel).
-fn half_leading(decls: &[Decl]) -> Option<(f64, f64)> {
-    let m = text_metrics(decls);
+fn half_leading(decls: &[Decl], inherited: Option<&str>) -> Option<(f64, f64)> {
+    let m = text_metrics(decls, inherited);
     let leading = (m.line_px()? - m.text_size()?).round();
     let top = (leading / 2.0).floor();
     (leading != 0.0).then_some((top, leading - top))
 }
 
-fn translate_text(decls: &[Decl], diag: &mut Diagnostics, out: &mut Translated) {
+/// `text-shadow: 0 0 1px <color>`: Roblox's text stroke, a thin outline centered on the glyphs. It has no
+/// offset, and no blur beyond its own pixel.
+fn translate_text_shadow(decls: &[Decl], diag: &mut Diagnostics, out: &mut Translated) {
+    let Some(d) = last(decls, "text-shadow") else { return };
+    if d.value.as_str().is_some_and(|s| s.eq_ignore_ascii_case("none")) {
+        out.set_prop("TextStrokeTransparency", luau::Value::Number(1.0));
+        return;
+    }
+    let shadows = match &d.value {
+        Value::List { items, sep: ListSep::Comma, .. } => items.clone(),
+        other => vec![other.clone()],
+    };
+    if shadows.len() > 1 {
+        diag.warn("`text-shadow`: Roblox's text has one stroke; using the first shadow", d.span.as_ref());
+    }
+    let items = space_items(&shadows[0]);
+    let offsets: Vec<f64> = items.iter().filter_map(|v| v.as_number().and_then(length_px)).collect();
+    if offsets.iter().take(2).any(|o| *o != 0.0) || offsets.get(2).is_some_and(|blur| *blur > 1.0) {
+        diag.warn(
+            "`text-shadow`: Roblox's text stroke is a thin outline with no offset or blur (drawn as `0 0 1px`)",
+            d.span.as_ref(),
+        );
+    }
+    let color = items
+        .iter()
+        .find(|v| v.as_number().is_none())
+        .cloned()
+        .unwrap_or(Value::Color(Color::rgba(0.0, 0.0, 0.0, 1.0)));
+    match resolve_color(&color) {
+        Ok((value, alpha)) => {
+            out.set_prop("TextStrokeColor3", value);
+            out.set_prop(
+                "TextStrokeTransparency",
+                luau::Value::Number(compute_transparency(alpha.unwrap_or(1.0), None)),
+            );
+        }
+        Err(e) => diag.warn(format!("`text-shadow`: {e} (ignored)"), d.span.as_ref()),
+    }
+}
+
+fn translate_text(decls: &[Decl], inherited: Option<&str>, diag: &mut Diagnostics, out: &mut Translated) {
+    translate_text_shadow(decls, diag, out);
     let mut weight: Option<&'static str> = None;
     let mut style: Option<&'static str> = None;
     let mut family: Option<String> = None;
@@ -2583,7 +2812,7 @@ fn translate_text(decls: &[Decl], diag: &mut Diagnostics, out: &mut Translated) 
     // TextSize is a line's height and CSS's font-size the em (see FAMILY_LINE_RATIOS). LineHeight
     // then spaces each following line one CSS line box apart; the first line's half-leading is
     // padding (see half_leading).
-    let metrics = text_metrics(decls);
+    let metrics = text_metrics(decls, inherited);
     if let Some(size) = metrics.text_size() {
         if metrics.size.zip(metrics.family_ratio).is_some_and(|(s, r)| s * r > MAX_TEXT_SIZE + 0.5)
             && let Some(d) = decls.iter().rev().find(|d| d.name == "font-size" || d.name == "font")
@@ -2618,7 +2847,7 @@ fn translate_text(decls: &[Decl], diag: &mut Diagnostics, out: &mut Translated) 
     if have_font {
         let w = weight.unwrap_or("Regular");
         let s = style.unwrap_or("Normal");
-        let fam = family.unwrap_or_else(|| DEFAULT_FONT.to_string());
+        let fam = family.unwrap_or_else(|| inherited.unwrap_or(DEFAULT_FONT).to_string());
         out.set_prop(
             "FontFace",
             luau::Value::Font { family: fam, weight: Some(w.to_string()), style: Some(s.to_string()) },
@@ -2753,6 +2982,18 @@ fn min_length_px(d: Option<&Decl>, diag: &mut Diagnostics) -> f64 {
 }
 
 fn translate_size(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, out: &mut Translated) {
+    translate_size_from_content(decls, opts, diag, out);
+    // `contain: size`: the element's size doesn't come from what's in it (code sizes it).
+    if let Some(d) = last(decls, "contain")
+        && space_items(&d.value)
+            .iter()
+            .any(|v| v.as_str().is_some_and(|s| matches!(s.to_ascii_lowercase().as_str(), "size" | "strict")))
+    {
+        out.set_prop("AutomaticSize", luau::Value::enum_item("AutomaticSize", "None"));
+    }
+}
+
+fn translate_size_from_content(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, out: &mut Translated) {
     let (stretch_x, stretch_y) = stretched_size(decls, opts);
     // A flex item that grows but has no width starts from its content in CSS and grows from there.
     // Sized by its content in Roblox, it would feed back through any percentage-sized descendant
@@ -3398,7 +3639,8 @@ fn translate_box(
     const PADDING_NAMES: [&str; 4] = ["PaddingTop", "PaddingRight", "PaddingBottom", "PaddingLeft"];
     // The half-leading CSS puts above and below the text (see half_leading) goes on top of the padding,
     // and so does the border, which CSS draws inside the box and Roblox's UIStroke outside it.
-    let leading = if opts.groups.contains(&Group::Text) { half_leading(decls) } else { None };
+    let leading =
+        if opts.groups.contains(&Group::Text) { half_leading(decls, opts.inherited_family.as_deref()) } else { None };
     let inset = border_inset(decls);
     for (i, side) in sides.into_iter().enumerate() {
         let extra = inset
@@ -4235,6 +4477,7 @@ pub(crate) fn css_property_targets(name: &str) -> Vec<&'static str> {
         "translate" => vec!["Position", "AnchorPoint"],
         "rotate" => vec!["Rotation"],
         "font-size" => vec!["TextSize"],
+        "text-shadow" => vec!["TextStrokeColor3", "TextStrokeTransparency"],
         "z-index" => vec!["ZIndex"],
         _ => Vec::new(),
     }
@@ -4580,7 +4823,7 @@ mod tests {
     use super::*;
 
     fn opts_for(groups: &[Group]) -> ApproxOptions {
-        ApproxOptions { groups: Group::expand(groups), strict: false, tokens: HashMap::new() }
+        ApproxOptions { groups: Group::expand(groups), strict: false, tokens: HashMap::new(), inherited_family: None }
     }
 
     fn all_opts() -> ApproxOptions {

@@ -1950,3 +1950,112 @@ fn overflow_wrap_break_word_is_what_roblox_does() {
     assert_eq!(stderr.matches("warning").count(), 1, "{stderr}");
     assert!(stderr.contains("always breaks a word too long for its line"), "{stderr}");
 }
+
+// ---------- pictures ----------
+
+#[test]
+fn border_image_is_a_nine_slice_of_a_picture_whose_size_its_url_gives() {
+    let (out, stderr) = compile(
+        ".p { border-image: url(\"rbxassetid://1#192x44\") 18 fill; } \
+         .p:hover { border-image-source: url(\"rbxassetid://2#192x44\"); } \
+         .bar { border-image: url(\"rbxassetid://3#64x12\") 6 8 fill; border-image-width: 12px; }",
+        &["--approx"],
+    );
+    assert!(stderr.is_empty(), "{stderr}");
+    let p = rule_of(&out, ".p");
+    assert!(p.contains("Image = \"rbxassetid://1\","), "the size isn't part of the id:\n{out}");
+    assert!(
+        p.contains("ScaleType = Enum.ScaleType.Slice") && p.contains("SliceCenter = Rect.new(18, 18, 174, 26)"),
+        "{out}"
+    );
+    // A rule that only swaps the picture keeps the slicing.
+    let hover = rule_of(&out, ".p:Hover");
+    assert!(
+        hover.contains("Image = \"rbxassetid://2\"") && hover.contains("SliceCenter = Rect.new(18, 18, 174, 26)"),
+        "{out}"
+    );
+    let bar = rule_of(&out, ".bar");
+    assert!(bar.contains("SliceCenter = Rect.new(8, 6, 56, 6)") && bar.contains("SliceScale = 2"), "{out}");
+}
+
+#[test]
+fn border_image_says_what_roblox_needs() {
+    let (_, stderr) = compile(
+        ".a { border-image: url(\"rbxassetid://1\") 6 fill; } .b { border-image: url(\"rbxassetid://2#10x10\") 2; }",
+        &["--approx"],
+    );
+    assert!(stderr.contains("end its url with its size"), "{stderr}");
+    assert!(stderr.contains("always draws the middle of a sliced picture; add `fill`"), "{stderr}");
+}
+
+#[test]
+fn contain_size_stops_an_element_sizing_itself_by_its_content() {
+    let (out, _) = compile(".fill { contain: size; background-color: red; }", &["--approx"]);
+    assert!(rule_of(&out, ".fill").contains("AutomaticSize = Enum.AutomaticSize.None"), "{out}");
+}
+
+#[test]
+fn multiply_tints_the_picture() {
+    let (out, _) = compile(
+        ".f { background-image: url(\"rbxassetid://7\"); background-color: rgb(176, 160, 146); \
+         background-blend-mode: multiply; } .f.full { background-color: white; }",
+        &["--approx"],
+    );
+    let f = rule_of(&out, ".f");
+    assert!(f.contains("ImageColor3 = Color3.fromRGB(176, 160, 146)") && !f.contains("BackgroundColor3"), "{out}");
+    assert!(f.contains("BackgroundTransparency = 1"), "{out}");
+    assert!(rule_of(&out, ".f.full").contains("ImageColor3 = Color3.fromRGB(255, 255, 255)"), "{out}");
+}
+
+#[test]
+fn background_image_none_clears_the_picture() {
+    let (out, _) = compile(
+        ".x { background-image: url(\"rbxassetid://8#4x4\"); } .x.worn { background-image: none; }",
+        &["--approx"],
+    );
+    assert!(rule_of(&out, ".x").contains("Image = \"rbxassetid://8\""), "{out}");
+    assert!(rule_of(&out, ".x.worn").contains("Image = \"\""), "{out}");
+}
+
+#[test]
+fn text_shadow_is_the_text_stroke() {
+    let (out, stderr) = compile(
+        ".a { text-shadow: 0 0 1px rgba(0, 0, 0, 0.4); } .b { text-shadow: 0 0 rgb(120, 30, 10); } .c { text-shadow: 2px 2px 4px black; }",
+        &["--approx"],
+    );
+    let a = rule_of(&out, ".a");
+    assert!(
+        a.contains("TextStrokeColor3 = Color3.fromRGB(0, 0, 0)") && a.contains("TextStrokeTransparency = 0.6"),
+        "{out}"
+    );
+    let b = rule_of(&out, ".b");
+    assert!(
+        b.contains("TextStrokeColor3 = Color3.fromRGB(120, 30, 10)") && b.contains("TextStrokeTransparency = 0"),
+        "{out}"
+    );
+    assert!(stderr.contains("no offset or blur"), "{stderr}");
+    assert_eq!(stderr.matches("warning").count(), 1, "{stderr}");
+}
+
+#[test]
+fn url_of_an_expression_is_a_function_call() {
+    let (out, stderr) = compile(
+        "$pictures: (\"rbxassetid://1#4x4\", \"rbxassetid://2#4x4\"); $one: \"rbxassetid://3\";          .a { background-image: url(nth($pictures, 2)); } .b { background-image: url($one); }          .c { background-image: url(rbxassetid://4); }",
+        &["--approx"],
+    );
+    assert!(stderr.is_empty(), "{stderr}");
+    assert!(rule_of(&out, ".a").contains("Image = \"rbxassetid://2\""), "{out}");
+    assert!(rule_of(&out, ".b").contains("Image = \"rbxassetid://3\""), "{out}");
+    assert!(rule_of(&out, ".c").contains("Image = \"rbxassetid://4\""), "{out}");
+}
+
+#[test]
+fn text_sizes_and_weights_in_the_family_the_root_gives_it() {
+    let (out, _) = compile(
+        "ScreenGui { font: 14px Merriweather; } .a { font-size: 20px; } .b { font-weight: bold; }",
+        &["--approx"],
+    );
+    // Merriweather's line is taller than its em, so 20px is a larger TextSize than 20.
+    assert!(!rule_of(&out, ".a").contains("TextSize = 20,"), "{out}");
+    assert!(rule_of(&out, ".b").contains("Merriweather.json\", Enum.FontWeight.Bold"), "{out}");
+}

@@ -198,6 +198,27 @@ fn redefined_token_uses(sheet: &Sheet, index: usize, tokens: &HashMap<String, Va
         .collect()
 }
 
+/// The font family an interface's root gives all its text (`ScreenGui { font: 14px Gotham }`, as a
+/// page's body does), if a rule for a root names one.
+fn root_family(sheet: &Sheet) -> Option<String> {
+    use crate::selector::{Part, Simple};
+    const ROOTS: &[&str] = &["ScreenGui", "BillboardGui", "SurfaceGui", "LayerCollector"];
+    let is_root = |rule: &OutRule| {
+        !rule.query
+            && rule.parent.is_none()
+            && !rule.selector.0.is_empty()
+            && rule.selector.0.iter().all(|complex| {
+                matches!(complex.as_slice(), [Part::Compound(c)] if matches!(c.as_slice(), [Simple::Type(t)] if ROOTS.contains(&t.as_str())))
+            })
+    };
+    sheet
+        .rules
+        .iter()
+        .rev()
+        .filter(|r| is_root(r))
+        .find_map(|r| approx::declared_family(&r.decls.iter().map(to_decl).collect::<Vec<_>>()))
+}
+
 /// The CSS properties whose length tokens stay `"$Name"` references (see ApproxOptions::tokens).
 const TOKEN_PROPERTIES: &[&str] = &[
     "border-radius",
@@ -626,8 +647,14 @@ pub fn lower(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -> lu
         &substituted
     };
     let referenced = referenced_tokens(sheet);
-    let opts =
-        &CodegenOptions { approx: ApproxOptions { tokens: referenced.clone(), ..opts.approx.clone() }, ..opts.clone() };
+    let opts = &CodegenOptions {
+        approx: ApproxOptions {
+            tokens: referenced.clone(),
+            inherited_family: root_family(sheet),
+            ..opts.approx.clone()
+        },
+        ..opts.clone()
+    };
     let (sheet_attributes, themes) = sheet_and_theme_attributes(sheet, opts, diag);
     warn_compiled_theme_tokens(sheet, &referenced, diag);
 
@@ -1105,6 +1132,7 @@ const COMPOSITE_GROUPS: &[&[&str]] = &[
         "flex",
         "flex-grow",
         "box-sizing",
+        "contain",
         // a scroll container's own size can't be capped (see translate_size)
         "overflow",
         "overflow-x",
@@ -1160,12 +1188,24 @@ const COMPOSITE_GROUPS: &[&[&str]] = &[
         "outline",
         "outline-color",
         "scrollbar-color",
+        // multiplying puts the background color on the picture
+        "background-blend-mode",
+        "border-image",
+        "border-image-source",
         // a gradient's rotation depends on the element's shape
         "width",
         "height",
     ],
-    // ScaleType
-    &["object-fit", "background-size", "background-repeat"],
+    // Image, ScaleType and the slices
+    &[
+        "object-fit",
+        "background-size",
+        "background-repeat",
+        "border-image",
+        "border-image-source",
+        "border-image-slice",
+        "border-image-width",
+    ],
     // ScrollingDirection / AutomaticCanvasSize cover both axes
     &["overflow", "overflow-x", "overflow-y"],
     // transition longhands combine by index
@@ -1532,6 +1572,17 @@ fn lower_rule(
             own_only.set_prop("LineHeight", PLACEHOLDER);
             own_only.set_pseudo_prop("UIPadding", "PaddingTop", PLACEHOLDER);
             own_only.set_pseudo_prop("UIPadding", "PaddingBottom", PLACEHOLDER);
+        }
+        // A border image's slices are measured in its picture: `.p:hover { border-image-source: ... }`
+        // keeps the slicing `.p` gives it.
+        if own.iter().any(|d| d.name.starts_with("border-image")) {
+            for prop in ["Image", "ScaleType", "SliceCenter", "SliceScale"] {
+                own_only.set_prop(prop, PLACEHOLDER);
+            }
+        }
+        // A background color multiplied into a picture is its ImageColor3.
+        if own.iter().any(|d| matches!(d.name.as_str(), "background" | "background-color" | "background-blend-mode")) {
+            own_only.set_prop("ImageColor3", PLACEHOLDER);
         }
         // Scrolling lifts the cap that keeps a sized element out of a flex line's stretch:
         // `.log.scrolls { overflow-y: auto }` needs its canvas to outgrow `.log`'s height.
