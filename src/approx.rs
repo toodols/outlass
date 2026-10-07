@@ -415,7 +415,7 @@ pub static PROPERTIES: &[PropDoc] = &[
         group: Group::Position,
         roblox: "Position / AnchorPoint / Size",
         notes: "offsets the element from the edge it's placed by, and shrinks one stretched between opposite \
-                edges; `auto` on both sides centres it, on one side pushes it to the other. Siblings don't move, \
+                edges; `auto` on both sides centers it, on one side pushes it to the other. Siblings don't move, \
                 and flex and grid containers ignore it (with a warning): use `gap` or the container's padding",
     },
     PropDoc { css: "margin-top", group: Group::Position, roblox: "Position / Size", notes: "see `margin`" },
@@ -571,7 +571,7 @@ pub static PROPERTIES: &[PropDoc] = &[
         css: "scrollbar-color",
         group: Group::Color,
         roblox: "ScrollBarImageColor3 / ScrollBarImageTransparency",
-        notes: "the thumb colour; Roblox draws no track, so the track colour is ignored",
+        notes: "the thumb color; Roblox draws no track, so the track color is ignored",
     },
     PropDoc {
         css: "scrollbar-gutter",
@@ -584,7 +584,7 @@ pub static PROPERTIES: &[PropDoc] = &[
         css: "appearance",
         group: Group::Visibility,
         roblox: "AutoButtonColor",
-        notes: "`none` turns off a button's automatic hover/press colouring; `auto` turns it on",
+        notes: "`none` turns off a button's automatic hover/press coloring; `auto` turns it on",
     },
     // transition
     PropDoc { css: "transition", group: Group::Transition, roblox: "TweenInfo", notes: "" },
@@ -1210,10 +1210,10 @@ fn resolve_color(v: &Value) -> Result<(luau::Value, Option<f64>), String> {
     }
 }
 
-/// `1 - alpha * opacity`: the Roblox transparency a colour's alpha and `opacity` add up to.
+/// `1 - alpha * opacity`: the Roblox transparency a color's alpha and `opacity` add up to.
 ///
-/// This is always emitted by the rule that sets either input, opaque colours included. Roblox has
-/// one Transparency slot where CSS has a colour alpha and an `opacity`, so a rule that leaves the
+/// This is always emitted by the rule that sets either input, opaque colors included. Roblox has
+/// one Transparency slot where CSS has a color alpha and an `opacity`, so a rule that leaves the
 /// slot alone leaves whatever a weaker rule put there — which is how `background-color: <opaque>`
 /// used to be unable to undo a weaker `background-color: transparent`.
 fn compute_transparency(alpha: f64, opacity_factor: Option<f64>) -> f64 {
@@ -1236,7 +1236,7 @@ fn is_solid_bg_value(v: &Value) -> bool {
     matches!(v, Value::Color(_)) || is_clear(v)
 }
 
-/// `none`, `transparent`, or any fully transparent colour.
+/// `none`, `transparent`, or any fully transparent color.
 fn is_clear(v: &Value) -> bool {
     match v {
         Value::Color(c) => c.a <= 1e-9,
@@ -1248,7 +1248,7 @@ fn is_clear(v: &Value) -> bool {
 }
 
 /// Any CSS gradient function. The radial and conic ones have no Roblox equivalent, but they are
-/// still recognised here so that they warn rather than falling through to "expected a color".
+/// still recognized here so that they warn rather than falling through to "expected a color".
 fn is_gradient_call(v: &Value) -> bool {
     matches!(v, Value::Call { name, .. } if name.ends_with("-gradient"))
 }
@@ -1266,7 +1266,7 @@ fn top_gradient(v: &Value) -> Option<Value> {
     layers(v).into_iter().find(is_gradient_call)
 }
 
-/// The layer BackgroundColor3 would hold: the bottom-most flat colour of the stack.
+/// The layer BackgroundColor3 would hold: the bottom-most flat color of the stack.
 fn bottom_solid(v: &Value) -> Option<Value> {
     layers(v).into_iter().rev().find(is_solid_bg_value)
 }
@@ -1304,7 +1304,7 @@ fn translate_color_opacity(
         // -webkit-text-fill-color overrides color, as in browsers.
         if let Some(d) = last(decls, "text-fill-color").or_else(|| last(decls, "color")) {
             if clip_text && is_clear(&d.value) {
-                // Part of the gradient-text idiom; the gradient provides the colour.
+                // Part of the gradient-text idiom; the gradient provides the color.
             } else {
                 match resolve_color(&d.value) {
                     Ok((expr, alpha)) => {
@@ -1334,16 +1334,16 @@ fn translate_color_opacity(
     let mut gradient: Option<Gradient> = None;
     let mut gradient_span: Option<Span> = None;
     let mut mask: Option<Gradient> = None;
-    // The colour the gradient is painted over, when it's a colour we can actually read.
+    // The color the gradient is painted over, when it's a color we can actually read.
     let mut under: Option<Color> = None;
     let mut under_is_token = false;
     if color_on {
         let bg_color_decl = last(decls, "background-color");
         let bg_decl = last(decls, "background");
         let bg_image_decl = last(decls, "background-image");
-        // CSS paints background layers front to back, a gradient over the background colour.
+        // CSS paints background layers front to back, a gradient over the background color.
         // Roblox has one BackgroundColor3 and one UIGradient, and the UIGradient *multiplies* the
-        // colour under it instead of covering it, so the layers are flattened into the gradient's
+        // color under it instead of covering it, so the layers are flattened into the gradient's
         // own stops further down and the element is painted white to make the multiply a no-op.
         let gradient_layer =
             [bg_decl, bg_image_decl].into_iter().flatten().find_map(|d| top_gradient(&d.value).map(|v| (d, v)));
@@ -1352,7 +1352,7 @@ fn translate_color_opacity(
             .or_else(|| bg_decl.and_then(|d| bottom_solid(&d.value).map(|v| (d, v))));
         if let Some((d, value)) = &solid {
             if is_clear(value) {
-                // `none` / `transparent`: nothing to draw, so no colour to set.
+                // `none` / `transparent`: nothing to draw, so no color to set.
                 have_bg = true;
                 bg_alpha = 0.0;
             } else {
@@ -1420,7 +1420,7 @@ fn translate_color_opacity(
 
     // A UIGradient multiplies BackgroundColor3 and multiplies its Transparency into
     // BackgroundTransparency (both measured in Studio), where CSS paints `background-image` over
-    // `background-color` and an opaque gradient hides the colour completely. Flattening the colour
+    // `background-color` and an opaque gradient hides the color completely. Flattening the color
     // into the stops and painting the element white reproduces the CSS result: the multiply becomes
     // a no-op and every layer is already in the sequence.
     if let Some(g) = &mut gradient
@@ -1430,19 +1430,19 @@ fn translate_color_opacity(
             g.composite_over(under);
         } else if under_is_token && g.has_alpha() {
             diag.warn(
-                "a translucent gradient can't be flattened onto a `var()` background colour, so the \
-                 colour is dropped (give the gradient opaque stops, or the element a literal colour)",
+                "a translucent gradient can't be flattened onto a `var()` background color, so the \
+                 color is dropped (give the gradient opaque stops, or the element a literal color)",
                 gradient_span.as_ref(),
             );
         }
-        // A UIGradient colours everything its element draws, text included (it's how gradient text
+        // A UIGradient colors everything its element draws, text included (it's how gradient text
         // works), and there's no way to keep it to the background. Text over a gradient background
-        // takes on the gradient's colours, which makes it the colour of the background under it.
+        // takes on the gradient's colors, which makes it the color of the background under it.
         if decls.iter().any(|d| {
             matches!(strip_vendor_prefix(&d.name), "color" | "text-fill-color" | "font" | "font-family" | "font-size")
         }) {
             diag.warn(
-                "a gradient background also tints this element's text (a UIGradient colours everything its \
+                "a gradient background also tints this element's text (a UIGradient colors everything its \
                  element draws), which hides the text in the gradient; put the text in a child element over the \
                  gradient one",
                 gradient_span.as_ref(),
@@ -1536,7 +1536,7 @@ struct Gradient {
 
 impl Gradient {
     /// The UIGradient rotation for an element `size` px wide and tall. A UIGradient works in the
-    /// element's normalised space, where a CSS angle A points along (W sin A, -H cos A); on a
+    /// element's normalized space, where a CSS angle A points along (W sin A, -H cos A); on a
     /// square that is just A - 90. Direction keywords (`to bottom right`) already run corner to
     /// corner in both, as do right angles, so only other CSS angles need the size.
     fn rotation_for(&self, size: Option<(f64, f64)>) -> f64 {
@@ -1574,8 +1574,8 @@ impl Gradient {
         self.stops.iter().any(|(_, c)| c.a < 1.0 - 1e-9)
     }
 
-    /// Paints the gradient over a solid colour, the way CSS layers a background image on top of
-    /// the background colour. An opaque stop swallows the colour; a translucent one blends with it.
+    /// Paints the gradient over a solid color, the way CSS layers a background image on top of
+    /// the background color. An opaque stop swallows the color; a translucent one blends with it.
     fn composite_over(&mut self, under: &Color) {
         for (_, c) in &mut self.stops {
             *c = over(c, under);
@@ -1620,8 +1620,8 @@ fn transparency_sequence(gradient: Option<&Gradient>, mask: Option<&Gradient>) -
     ))
 }
 
-/// The colour a stop list shows at `position`, clamped at both ends. Where two stops share a
-/// position (a hard stop) this is the colour on its right, which is what the gradient draws from
+/// The color a stop list shows at `position`, clamped at both ends. Where two stops share a
+/// position (a hard stop) this is the color on its right, which is what the gradient draws from
 /// there on.
 fn color_at(stops: &[(f64, Color)], position: f64) -> Color {
     let last = &stops[stops.len() - 1];
@@ -1657,8 +1657,8 @@ fn mix(a: &Color, b: &Color, t: f64) -> Color {
     Color::rgba(lerp(a.r, b.r), lerp(a.g, b.g), lerp(a.b, b.b), lerp(a.a, b.a))
 }
 
-/// One item of a gradient's stop list: a colour with zero, one or two positions, or a bare
-/// position, which CSS calls a colour hint (where the fade around it is half done).
+/// One item of a gradient's stop list: a color with zero, one or two positions, or a bare
+/// position, which CSS calls a color hint (where the fade around it is half done).
 enum StopItem {
     Stop { color: Color, positions: Vec<f64> },
     Hint(f64),
@@ -1698,11 +1698,11 @@ fn parse_stop_item(v: &Value, diag: &mut Diagnostics, span: Option<&Span>) -> Op
 }
 
 /// Resolves a stop list onto the gradient line the way CSS does: an unpositioned first or last
-/// stop sits at each end, a run of unpositioned stops is spread evenly between its neighbours, and
-/// a position may never go backwards. Colour hints become an explicit stop holding the colour the
+/// stop sits at each end, a run of unpositioned stops is spread evenly between its neighbors, and
+/// a position may never go backwards. Color hints become an explicit stop holding the color the
 /// fade is halfway to.
 fn resolve_stops(items: Vec<StopItem>) -> Vec<(f64, Color)> {
-    // `<color> <pos> <pos>` is two stops of the same colour: the CSS hard-stop shorthand.
+    // `<color> <pos> <pos>` is two stops of the same color: the CSS hard-stop shorthand.
     let mut colors: Vec<Color> = Vec::new();
     let mut positions: Vec<Option<f64>> = Vec::new();
     // Hints, as (index of the stop they follow, position).
@@ -1763,7 +1763,7 @@ fn resolve_stops(items: Vec<StopItem>) -> Vec<(f64, Color)> {
         i = end;
     }
     let mut stops: Vec<(f64, Color)> = positions.into_iter().map(Option::unwrap).zip(colors).collect();
-    // A hint says where the two colours around it are mixed half and half. One extra stop is not
+    // A hint says where the two colors around it are mixed half and half. One extra stop is not
     // the CSS easing curve, but it does put the midpoint where the author asked for it.
     for (after, pos) in hints.into_iter().rev() {
         if after + 1 >= stops.len() {
@@ -1793,7 +1793,7 @@ fn repeat_stops(stops: &[(f64, Color)]) -> Vec<(f64, Color)> {
         for (p, c) in stops {
             let p = p + offset;
             // Consecutive copies meet at one position. Both stops stay, since the step from the
-            // last colour back to the first is the hard edge that makes the pattern repeat; only
+            // last color back to the first is the hard edge that makes the pattern repeat; only
             // an identical pair would be redundant.
             let same = out.last().is_some_and(|(lp, lc): &(f64, Color)| {
                 (lp - p).abs() < 1e-9
@@ -2330,7 +2330,7 @@ fn text_metrics(decls: &[Decl]) -> TextMetrics {
     TextMetrics { size, line_height: ratio, family_ratio: family.as_deref().and_then(family_line_ratio) }
 }
 
-/// CSS centres every line in a box `line-height` tall. Roblox makes the first line exactly
+/// CSS centers every line in a box `line-height` tall. Roblox makes the first line exactly
 /// TextSize tall and applies LineHeight only to the lines after it, so a CSS text box is taller by
 /// half the leading above and below: `(line-height x font-size - TextSize) / 2` each. Returns the
 /// (top, bottom) padding for that, when both are known. Roblox rounds padding to whole pixels, so
@@ -3055,7 +3055,7 @@ fn translate_position(decls: &[Decl], diag: &mut Diagnostics, out: &mut Translat
     if [mt, mr, mb, ml].iter().any(Option::is_some) {
         let horizontal =
             place_with_margins((left.as_ref(), right.as_ref()), (ml, mr), true, (&mut xs, &mut xo, &mut anchor_x));
-        // Vertical `auto` margins are 0 in normal flow; they only centre between `top` and `bottom`.
+        // Vertical `auto` margins are 0 in normal flow; they only center between `top` and `bottom`.
         let vertical = place_with_margins(
             (top.as_ref(), bottom.as_ref()),
             (mt, mb),
@@ -3182,7 +3182,7 @@ fn place_with_margins(
     let (ms_start, mo_start) = Margin::length(m_start);
     let (ms_end, mo_end) = Margin::length(m_end);
     match (free && Margin::is_auto(m_start), free && Margin::is_auto(m_end)) {
-        // Centred in the space between the two edges.
+        // Centered in the space between the two edges.
         (true, true) => {
             *scale = (s_start + 1.0 - s_end) / 2.0;
             *offset = (o_start - o_end) / 2.0;
@@ -3252,7 +3252,7 @@ fn parse_border_shorthand(v: &Value) -> (Option<Value>, Option<Value>, Option<Va
     for it in items {
         match &it {
             Value::Number(_) => width = Some(it),
-            // A `var()` token or a colour function (`rgba(...)` kept as a call) is the colour too.
+            // A `var()` token or a color function (`rgba(...)` kept as a call) is the color too.
             Value::Color(_) | Value::Call { .. } => color = Some(it),
             Value::Str { .. } => style = Some(it),
             _ => {}
@@ -4920,7 +4920,7 @@ mod tests {
 
     #[test]
     fn token_reference_is_opaque() {
-        // A StyleSheet attribute holds a Color3, which has no alpha channel, so a token-coloured
+        // A StyleSheet attribute holds a Color3, which has no alpha channel, so a token-colored
         // background is opaque — and says so, to undo a weaker rule's transparency.
         let mut diag = Diagnostics::default();
         let token = Value::Call { name: "var".to_string(), args: vec![Value::str("--Accent")] };

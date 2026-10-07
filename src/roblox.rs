@@ -222,7 +222,7 @@ fn call(name: &str, args: &[Value], opts: &ValueOptions) -> Result<luau::Value, 
                 vec![(0.0, c.clone()), (1.0, c)]
             }
             [a, b] => vec![(0.0, color_arg(a, opts)?), (1.0, color_arg(b, opts)?)],
-            _ => return Err("ColorSequence.new() takes a colour, two colours or a list of keypoints".into()),
+            _ => return Err("ColorSequence.new() takes a color, two colors or a list of keypoints".into()),
         }),
         "NumberSequence.new" => luau::Value::NumberSequence(match args {
             [Value::List { items, .. }] => items.iter().map(number_keypoint).collect::<Result<Vec<_>, _>>()?,
@@ -277,7 +277,7 @@ fn call(name: &str, args: &[Value], opts: &ValueOptions) -> Result<luau::Value, 
 fn color_arg(v: &Value, opts: &ValueOptions) -> Result<Color3, String> {
     match value(v, opts)? {
         luau::Value::Color3(c) => Ok(c),
-        _ => Err(format!("expected a colour, got `{}`", v.inspect())),
+        _ => Err(format!("expected a color, got `{}`", v.inspect())),
     }
 }
 
@@ -310,7 +310,7 @@ fn color_call(name: &str, args: &[Value]) -> Result<Color3, String> {
         }
         _ => {
             let [Value::Str { text, .. }] = args else { return Err("Color3.fromHex() takes one string".into()) };
-            hex(text).ok_or_else(|| format!("Color3.fromHex(): `{text}` isn't a hex colour"))?
+            hex(text).ok_or_else(|| format!("Color3.fromHex(): `{text}` isn't a hex color"))?
         }
     })
 }
@@ -358,7 +358,7 @@ fn keypoint_args<'a>(v: &'a Value, name: &str) -> Result<&'a [Value], String> {
 fn color_keypoint(v: &Value, opts: &ValueOptions) -> Result<(f64, Color3), String> {
     match keypoint_args(v, "ColorSequenceKeypoint.new")? {
         [Value::Number(t), c] => Ok((number_value(t)?, color_arg(c, opts)?)),
-        _ => Err("ColorSequenceKeypoint.new() takes a time and a colour".into()),
+        _ => Err("ColorSequenceKeypoint.new() takes a time and a color".into()),
     }
 }
 

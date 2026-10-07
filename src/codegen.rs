@@ -99,9 +99,9 @@ fn token_value(v: &Value, name: &str, diag: &mut Diagnostics, span: &crate::diag
 
 /// Custom properties whose uses are compiled in rather than referenced. A `var()` becomes a
 /// `"$Token"` reference, which Roblox resolves at run time (so themes can change it), but only an
-/// opaque colour token works that way everywhere outlass translates CSS: a font family, a length or
+/// opaque color token works that way everywhere outlass translates CSS: a font family, a length or
 /// a gradient has to be known at compile time to become a FontFace, a UDim or a UIGradient, and a
-/// Color3 attribute has no alpha, so a translucent colour's transparency would be lost. So the
+/// Color3 attribute has no alpha, so a translucent color's transparency would be lost. So the
 /// `:root` value of every other token is substituted into the declarations that use it, unless a
 /// rule or query redefines that token, in which case its value isn't fixed.
 fn inline_tokens(sheet: &Sheet) -> HashMap<String, Value> {
@@ -114,7 +114,7 @@ fn inline_tokens(sheet: &Sheet) -> HashMap<String, Value> {
         .collect()
 }
 
-/// A token's value to compile into the declarations that use it, or `None` for an opaque colour,
+/// A token's value to compile into the declarations that use it, or `None` for an opaque color,
 /// which stays a `"$Name"` reference (see inline_tokens).
 fn inline_value(t: &Token) -> Option<Value> {
     let v = token_value(&t.value, &t.name, &mut Diagnostics::default(), &t.span);
@@ -585,7 +585,7 @@ pub fn lower(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -> lu
         gui_defaults.push(("AutomaticSize".to_string(), luau::Value::enum_item("AutomaticSize", "XY")));
     }
     // A CSS box has no background and no border unless given one; a fresh GuiObject has an opaque
-    // grey background and a 1px legacy border. Any rule with a background sets
+    // gray background and a 1px legacy border. Any rule with a background sets
     // BackgroundTransparency itself (see the transparency cascade), and any border clears
     // BorderSizePixel, so these only fill in what CSS leaves unset.
     if opts.approx.groups.contains(&approx::Group::Color) {
@@ -648,8 +648,8 @@ pub fn lower(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -> lu
             ..Default::default()
         },
     );
-    // CSS text starts at the top left of its box (`text-align: start`); Roblox centres it both
-    // ways. A button is the exception, whose content browsers centre too.
+    // CSS text starts at the top left of its box (`text-align: start`); Roblox centers it both
+    // ways. A button is the exception, whose content browsers center too.
     if opts.approx.groups.contains(&approx::Group::Text) {
         rules.insert(
             1,
@@ -966,7 +966,7 @@ const COMPOSITE_GROUPS: &[&[&str]] = &[
         "row-gap",
         "column-gap",
     ],
-    // transparency combines colour alpha, opacity, gradients and masks
+    // transparency combines color alpha, opacity, gradients and masks
     &[
         "opacity",
         "color",
@@ -1046,7 +1046,7 @@ fn restrict_to(mut full: approx::Translated, keys: &approx::Translated) -> appro
     full
 }
 
-/// `::placeholder { color: grey }`: a TextBox's placeholder text, which Roblox colours with
+/// `::placeholder { color: gray }`: a TextBox's placeholder text, which Roblox colors with
 /// PlaceholderColor3.
 fn placeholder_props(
     rule: &OutRule,
@@ -1093,7 +1093,7 @@ fn is_inherited(name: &str) -> bool {
     INHERITED.contains(&name.strip_prefix("-webkit-").unwrap_or(name))
 }
 
-/// CSS text properties are inherited: `.card { color: white }` colours the text of everything
+/// CSS text properties are inherited: `.card { color: white }` colors the text of everything
 /// inside the card. Roblox styles each element on its own, so a rule that sets them also gets a
 /// rule for the text elements under it (`.card >> TextLabel`). Inherited values lose to every
 /// rule that styles the text element itself, so these rank between the user-agent defaults and
@@ -1116,7 +1116,7 @@ fn inherited_text_rules(
         let tokens = rule_tokens(sheet, idx, root_tokens);
         let resolve = |d: Decl| Decl { value: inline_vars(&d.value, &tokens), ..d };
         // Gradient text (`background-clip: text; color: transparent`) only tints the element's
-        // own text in Roblox, so its transparent colour would hide the text inside it.
+        // own text in Roblox, so its transparent color would hide the text inside it.
         let clips_text = rule.decls.iter().any(|d| {
             d.name.ends_with("background-clip") && d.value.as_str().is_some_and(|s| s.eq_ignore_ascii_case("text"))
         });

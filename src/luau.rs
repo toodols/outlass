@@ -11,7 +11,7 @@
 
 use std::fmt::Write as _;
 
-/// An RGB colour, channels 0-255 (may be fractional).
+/// An RGB color, channels 0-255 (may be fractional).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Color3 {
     pub r: f64,
@@ -67,7 +67,7 @@ pub enum Value {
     /// min x, min y, max x, max y
     Rect(f64, f64, f64, f64),
     NumberRange(f64, f64),
-    /// (time, colour) keypoints
+    /// (time, color) keypoints
     ColorSequence(Vec<(f64, Color3)>),
     /// (time, value, envelope) keypoints
     NumberSequence(Vec<(f64, f64, f64)>),

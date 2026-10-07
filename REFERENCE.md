@@ -66,7 +66,7 @@ Put it in a ModuleScript and apply it with a `StyleLink` under your `ScreenGui`.
 | `PascalCase: value` | Roblox property, set to the value below |
 | `--Name: value` | `SetAttribute` on the rule (or on the sheet in `:root`/top level); raw text, so use `#{}` |
 | `@font-face { font-family: Brand; src: url("rbxassetid://…") }` | `font-family: Brand` uses that asset |
-| `var(--Name)`, `token(Name)` | token reference `"$Name"`; in a CSS property, a `:root` token that isn't a colour is compiled in (see below) |
+| `var(--Name)`, `token(Name)` | token reference `"$Name"`; in a CSS property, a `:root` token that isn't a color is compiled in (see below) |
 | the CSS cascade, `!important`, `@layer` | `StyleRule.Priority` (see [The cascade](#the-cascade)) |
 | `Transition: BackgroundColor3 0.2s Quad Out` | `SetPropertyTransitions` (`*`/`all` → `SetDefaultPropertyTransition`) |
 | `@media`, `@container`, `@PreferredInputTouch { ... }` | `@Name` query selectors (see [Queries](#queries)) |
@@ -114,12 +114,12 @@ element a `width` and a `height` sets `AutomaticSize` back to `None`, so authore
 get `AutoButtonColor = false`, since a browser button only changes on hover or press when a `:hover` or
 `:active` rule says so. With
 `--approx=text`, `TextLabel` and `TextBox` text starts at the top left (`text-align: start`), where Roblox
-centres it; a `TextButton` stays centred, as a browser centres a button's content. To opt out by hand,
+centers it; a `TextButton` stays centered, as a browser centers a button's content. To opt out by hand,
 set the property on any rule, e.g. `RichText: false` or `AutomaticSize: Enum.AutomaticSize.None`.
 
 A `var()` in a CSS property is a `"$Name"` reference that Roblox resolves at run time, so a theme can
-change it. That only works for opaque colours, though (a Color3 attribute has no alpha, so a translucent
-colour is compiled in too): a font family, a length or a gradient has to be known when
+change it. That only works for opaque colors, though (a Color3 attribute has no alpha, so a translucent
+color is compiled in too): a font family, a length or a gradient has to be known when
 outlass compiles it into a `FontFace`, a `UDim` or a `UIGradient`. So `var(--font-body)` or
 `var(--radius)` gets the token's value compiled in. Tokens cascade as in CSS: a rule uses the value
 its own elements get, from `:root`, a weaker rule for the same elements, or the rule itself. When a
@@ -164,7 +164,7 @@ frame:AddTag("shown")
 The same applies to any property a rule sets, not only transparency:
 
 - **User-agent defaults.** Setting `BorderSizePixel = 1`, `AutomaticSize = None`, `RichText = false`,
-  `TextWrapped = false`, centred `TextXAlignment`/`TextYAlignment` or `AutoButtonColor = true` from code
+  `TextWrapped = false`, centered `TextXAlignment`/`TextYAlignment` or `AutoButtonColor = true` from code
   is ignored too, because each is Roblox's default. Set these on a rule instead.
 - **Your own rules.** If `.badge { opacity: 0.5 }` gives a label `TextTransparency = 0.5`, a tween of
   `TextTransparency` to `0` stops at `0.5`. `ImageTransparency`, `ScrollBarImageTransparency` and a
@@ -247,7 +247,7 @@ It follows CSS semantics where Roblox allows:
 - `position: absolute` with `left` and `right` (or `inset: 0`) and no width stretches the element.
 - `translate(-50%, -50%)` centers it.
 - `margin` offsets an element from the edge it's placed by, and insets one stretched between two
-  edges, so `inset: 0; margin: 8px` leaves 8px all round. `margin: 0 auto` centres an element with a
+  edges, so `inset: 0; margin: 8px` leaves 8px all around. `margin: 0 auto` centers an element with a
   width, and `margin-left: auto` pushes it right. Margins never move siblings, and a flex or grid
   container ignores them, so outside absolute positioning outlass warns: use `gap`, or padding on the
   container.
@@ -276,18 +276,18 @@ It follows CSS semantics where Roblox allows:
   `LineHeight` at 3.
 - `fit-content` sizes an element from its content even when a weaker rule gives it a size: the Size is
   zeroed, since `AutomaticSize` only grows an element past its Size.
-- `align-content: center` centres a block's text vertically, as it does in CSS. `vertical-align` does
+- `align-content: center` centers a block's text vertically, as it does in CSS. `vertical-align` does
   the same in outlass but nothing to a block in a browser.
 - Padding is always inside the size (`box-sizing: border-box`), since that's how `UIPadding` works.
 - A border takes room inside the box, as in CSS: its width is added to the padding, since a
   `UIStroke` is drawn outside the element and takes none. An outline takes no room in either.
 - `border: none` also clears Roblox's legacy `BorderSizePixel`.
 - A `background-image` gradient is painted **over** `background-color`, as in CSS, so an opaque
-  gradient hides the colour entirely. A UIGradient can't do that — it multiplies `BackgroundColor3`
-  and multiplies its `Transparency` into `BackgroundTransparency` — so outlass flattens the colour
+  gradient hides the color entirely. A UIGradient can't do that — it multiplies `BackgroundColor3`
+  and multiplies its `Transparency` into `BackgroundTransparency` — so outlass flattens the color
   into the gradient's own stops and paints the element white, which turns the multiply into a no-op.
-  Translucent stops blend with the colour instead of replacing it, exactly as a browser composites
-  them. A `var()` colour can't be flattened, so a translucent gradient over one warns.
+  Translucent stops blend with the color instead of replacing it, exactly as a browser composites
+  them. A `var()` color can't be flattened, so a translucent gradient over one warns.
 - `repeating-linear-gradient()` has no Roblox counterpart, so its pattern is written out stop by stop
   (`#222 0 10%, #444 10% 20%` becomes five copies, each ending in a hard stop). Stop positions have to
   be percentages, since a StyleRule doesn't know the element's size, and a Roblox sequence holds 20
@@ -303,9 +303,9 @@ match the same elements. So in `.bar { top: 36px; &.left { left: 34% } }`, `.bar
 `top: 36px`. The same applies to fonts, flex settings, colors and opacity, and transitions.
 
 Transparency works the same way, with one consequence worth knowing. Roblox has a single
-`BackgroundTransparency` where CSS has a colour alpha and an `opacity`, so any rule that sets either
+`BackgroundTransparency` where CSS has a color alpha and an `opacity`, so any rule that sets either
 input emits the transparency they add up to — including `BackgroundTransparency = 0` for an opaque
-colour. That's what lets `.panel.solid { background-color: #123 }` undo a weaker
+color. That's what lets `.panel.solid { background-color: #123 }` undo a weaker
 `.panel { background-color: transparent }` instead of staying invisible. The same holds for `color` and
 `TextTransparency`, and for a border's `::UIStroke`.
 
@@ -337,30 +337,50 @@ names the classes each CollectionService tag (or `#Name`) is used on:
 
 A rule then keeps only the properties its elements' classes have, and warns about a Roblox property, or a
 CSS declaration, that would do nothing (`` `background-image` sets Image, which Frame doesn't have ``).
-Inherited text properties are exempt: `.card { color: white }` still colours the text inside the card.
+Inherited text properties are exempt: `.card { color: white }` still colors the text inside the card.
 A type selector narrows the classes the same way, with or without the file (`Frame.card`), and an
-element with several tags can only be the classes they share. This prints the table for a place, from
-Studio's command bar:
+element with several tags can only be the classes they share.
+
+Rojo builds a `.json` file into a ModuleScript that returns its contents, so the game can load the same
+table and complain about any tagged element whose class the stylesheet doesn't expect:
 
 ```lua
-local tags = {}
-for _, gui in game:GetService("StarterGui"):GetDescendants() do
-	if gui:IsA("GuiObject") then
-		for _, tag in gui:GetTags() do
-			tags[tag] = tags[tag] or {}
-			if not table.find(tags[tag], gui.ClassName) then
-				table.insert(tags[tag], gui.ClassName)
-			end
-		end
+local CollectionService = game:GetService("CollectionService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+-- tags.json, built by Rojo into a ModuleScript
+local tags = require(ReplicatedStorage.Styles.tags)
+
+local function check(instance: Instance, tag: string, classes: { string })
+	if not table.find(classes, instance.ClassName) then
+		warn(
+			`{instance:GetFullName()} is a {instance.ClassName}, but the stylesheet expects "{tag}" on `
+				.. table.concat(classes, " or ")
+		)
 	end
 end
-print(game:GetService("HttpService"):JSONEncode(tags))
+
+for tag, classes in tags do
+	-- `#Name` keys select by name, not by a CollectionService tag.
+	if string.sub(tag, 1, 1) == "#" then
+		continue
+	end
+	if type(classes) == "string" then
+		classes = { classes }
+	end
+	for _, instance in CollectionService:GetTagged(tag) do
+		check(instance, tag, classes)
+	end
+	CollectionService:GetInstanceAddedSignal(tag):Connect(function(instance)
+		check(instance, tag, classes)
+	end)
+end
 ```
 
 ### `--strict`
 
 Some CSS compiles fine but lays out differently in Roblox than in a browser, because Roblox has no
-equivalent behaviour. `--strict` makes each case that can be seen from the stylesheet an error: every one
+equivalent behavior. `--strict` makes each case that can be seen from the stylesheet an error: every one
 is reported, then the build fails and nothing is written. Each error names the CSS that makes the two
 agree:
 
@@ -423,7 +443,7 @@ Where dart-sass draws a line, so does outlass:
   variable. outlass then reads that text back as a CSS value, which is what turns `--Surface: #1f2937`
   into a `Color3` and `--Elevation: 2` into a number. Text it can't read back stays a string.
 
-`darken()` and `lighten()` (and the other legacy global colour functions) still work, but Dart Sass
+`darken()` and `lighten()` (and the other legacy global color functions) still work, but Dart Sass
 deprecates them for removal in 3.0; `color.scale()` / `color.adjust()` are the forward-compatible
 spellings.
 

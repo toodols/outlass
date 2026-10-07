@@ -330,7 +330,7 @@ fn important_reverses_the_layer_order() {
     assert!(priority_of(&out, ".a") > priority_of(&out, ".b"), "an earlier layer's !important wins:\n{out}");
     assert!(priority_of(&out, ".b") > priority_of(&out, ".c"), "a layer's !important beats an unlayered one:\n{out}");
 }
-// ---------- 11. colours ----------
+// ---------- 11. colors ----------
 
 #[test]
 fn colors_become_from_rgb() {
@@ -768,7 +768,7 @@ fn repeating_linear_gradient_is_written_out_stop_by_stop() {
         &["--approx"],
     );
     let gradient = &out[out.find("\".stripes::UIGradient\"").unwrap()..];
-    // Five copies of the two-colour pattern, each ending in a hard stop (two keypoints at one time).
+    // Five copies of the two-color pattern, each ending in a hard stop (two keypoints at one time).
     assert_eq!(gradient[..gradient.find('}').unwrap()].matches("ColorSequenceKeypoint.new(").count(), 20, "{out}");
     assert!(gradient.contains(r##"ColorSequenceKeypoint.new(0, Color3.fromRGB(34, 34, 34)), ColorSequenceKeypoint.new(0.1, Color3.fromRGB(34, 34, 34)), ColorSequenceKeypoint.new(0.1, Color3.fromRGB(68, 68, 68)), ColorSequenceKeypoint.new(0.2, Color3.fromRGB(68, 68, 68)), ColorSequenceKeypoint.new(0.2, Color3.fromRGB(34, 34, 34))"##), "{out}");
     assert!(gradient.contains("Rotation = -45"), "{out}");
@@ -801,12 +801,12 @@ fn a_repeating_gradient_that_does_not_fit_warns_instead_of_erroring_in_roblox() 
 
 #[test]
 fn gradient_stop_positions_follow_css() {
-    // A first stop past 0 holds its colour back to the start, rather than being dragged to 0.
+    // A first stop past 0 holds its color back to the start, rather than being dragged to 0.
     let (out, stderr) = compile(".a { background: linear-gradient(to right, red 50%, blue); }", &["--approx"]);
     assert!(out.contains(r##"ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 0, 0)), ColorSequenceKeypoint.new(0.5, Color3.fromRGB(255, 0, 0)), ColorSequenceKeypoint.new(1, Color3.fromRGB(0, 0, 255))"##), "{out}");
     assert!(stderr.is_empty(), "{stderr}");
 
-    // A bare percentage is a colour hint: the two colours are mixed half and half there.
+    // A bare percentage is a color hint: the two colors are mixed half and half there.
     let (out, _) = compile(".b { background: linear-gradient(black, 25%, white); }", &["--approx"]);
     assert!(out.contains(r##"ColorSequenceKeypoint.new(0.25, Color3.fromRGB(128, 128, 128))"##), "{out}");
 
@@ -822,12 +822,12 @@ fn gradient_stop_positions_follow_css() {
 }
 
 #[test]
-fn a_gradient_is_painted_over_the_background_colour_like_css() {
+fn a_gradient_is_painted_over_the_background_color_like_css() {
     // A UIGradient multiplies BackgroundColor3 and has no way to cover it, where CSS paints
-    // `background-image` over `background-color`. So the colour is flattened into the stops and the
+    // `background-image` over `background-color`. So the color is flattened into the stops and the
     // element is painted white, which makes the multiply a no-op.
     //
-    // Opaque stops hide the colour completely, exactly as they do in a browser.
+    // Opaque stops hide the color completely, exactly as they do in a browser.
     let (out, stderr) = compile(
         ".plate { background-color: #204060; background-image: linear-gradient(#ffffff, #000000); }",
         &["--approx"],
@@ -835,7 +835,7 @@ fn a_gradient_is_painted_over_the_background_colour_like_css() {
     assert!(out.contains(r##"BackgroundColor3 = Color3.fromRGB(255, 255, 255)"##), "{out}");
     assert!(
         !out.contains(r##"Color3.fromRGB(32, 64, 96)"##),
-        "an opaque gradient hides the colour:
+        "an opaque gradient hides the color:
 {out}"
     );
     assert!(out.contains(r##"ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 255, 255)), ColorSequenceKeypoint.new(1, Color3.fromRGB(0, 0, 0))"##), "{out}");
@@ -877,7 +877,7 @@ fn webkit_text_stroke_longhands_and_current_color() {
     assert_eq!(code, 0, "{stdout}");
     assert!(stdout.starts_with("-webkit-text-stroke-color"), "{stdout}");
 
-    // An omitted colour is currentColor, i.e. the rule's own `color`.
+    // An omitted color is currentColor, i.e. the rule's own `color`.
     let (out, stderr) = compile(
         ".a { color: #ff0000; -webkit-text-stroke: 2px; }          .b { -webkit-text-stroke-width: 1px; -webkit-text-stroke-color: #00ff00; }          .c { -webkit-text-stroke: 0 #000; }",
         &["--approx"],
@@ -906,7 +906,7 @@ fn star_transition_is_the_default_transition() {
 
 #[test]
 fn cascaded_state_rules_do_not_add_properties() {
-    // `.t.positive` sets a colour, so it emits that colour and the transparency the colour implies
+    // `.t.positive` sets a color, so it emits that color and the transparency the color implies
     // (combined with the opacity it inherits from `.t`) — but nothing else: it must not re-emit the
     // base rule's Size, which would compete with the sibling `.wide` state.
     let (out, _) = compile(
@@ -925,8 +925,8 @@ fn cascaded_state_rules_do_not_add_properties() {
 }
 
 #[test]
-fn an_opaque_colour_undoes_a_weaker_rules_transparency() {
-    // Roblox has one Transparency slot where CSS has a colour alpha and an `opacity`, so a rule that
+fn an_opaque_color_undoes_a_weaker_rules_transparency() {
+    // Roblox has one Transparency slot where CSS has a color alpha and an `opacity`, so a rule that
     // paints an opaque background has to say so; otherwise the weaker rule's transparency sticks and
     // the element stays invisible.
     let (out, _) = compile(
@@ -1476,7 +1476,7 @@ fn font_size_is_the_em_so_text_size_scales_by_the_familys_line_height() {
 }
 
 #[test]
-fn non_colour_custom_properties_are_compiled_in() {
+fn non_color_custom_properties_are_compiled_in() {
     let (out, stderr) = compile(
         ":root { --accent: #7c5cff; --font-body: \"Source Sans Pro\", sans-serif; --radius: 8px; \
          --grad: linear-gradient(90deg, #000 0%, #fff 100%); } \
@@ -1488,7 +1488,7 @@ fn non_colour_custom_properties_are_compiled_in() {
     let a = rule_of(&out, ".a");
     assert!(a.contains("rbxasset://fonts/families/SourceSansPro.json"), "{out}");
     assert!(a.contains("TextSize = 16"), "the family is known, so the size scales:\n{out}");
-    // A colour token stays a live reference, so a theme can still change it.
+    // A color token stays a live reference, so a theme can still change it.
     assert!(a.contains("TextColor3 = \"$accent\""), "{out}");
     assert!(rule_of(&out, ".a::UICorner").contains("CornerRadius = UDim.new(0, 8)"), "{out}");
     assert!(out.contains("\".a::UIGradient\""), "{out}");
@@ -1498,7 +1498,7 @@ fn non_colour_custom_properties_are_compiled_in() {
 }
 
 #[test]
-fn border_colours_from_tokens() {
+fn border_colors_from_tokens() {
     let (out, _) = compile(
         ":root { --line: #445566; --faint: rgba(255, 255, 255, 0.08); } \
          .a { border: 1px solid var(--line); } .b { border: 1px solid var(--faint); }",

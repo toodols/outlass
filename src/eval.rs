@@ -1538,7 +1538,7 @@ impl<'a> Evaluator<'a> {
     /// `@forward`, transitively. `@extend` never reaches a stylesheet that loads *it*, which is how
     /// dart-sass scopes extension, so an extend in one leaf sheet can't rewrite another's selectors.
     /// (`@import`ed files have no module of their own, so their rules and extends belong to the
-    /// importer and keep the old global behaviour.)
+    /// importer and keep the old global behavior.)
     fn module_reachability(&self) -> Vec<Vec<bool>> {
         let mut roots = self.module_roots.clone();
         let mut deps: Vec<Vec<usize>> = Vec::new();

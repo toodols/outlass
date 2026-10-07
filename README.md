@@ -67,9 +67,10 @@ Some things can't be fixed by the stylesheet alone. For example, `width: 100%` i
 fits its content is 0 in Roblox but works in CSS. `--strict` turns these into errors and tells you what
 to write instead.
 
+## Behavior that could be annoying
 **A fade-in from code that ends invisible.** Roblox ignores a property set from Luau when the value is
 the default, and the stylesheet's value shows instead. Tweening `BackgroundTransparency` to `0` therefore
-ends at the starting style's `1`. Tween to `0.001`, or switch to a tagged rule. See
+ends at the starting style's `1`. Tween to `0.001`, or use a selector with transitions. See
 [A fade from code ends invisible](REFERENCE.md#a-fade-from-code-ends-invisible).
 
 See [REFERENCE.md](REFERENCE.md) for the full details.
