@@ -5,7 +5,8 @@
 //! (phantom children created via a `::ClassName` selector suffix, e.g. `Frame::UICorner`).
 
 use crate::diag::{Diagnostics, Span};
-use crate::luau::{self, LuauOptions};
+use crate::luau;
+use crate::roblox;
 use crate::value::*;
 
 // ---------------------------------------------------------------------------------------------
@@ -103,13 +104,13 @@ impl clap::ValueEnum for Group {
 // Public API types
 // ---------------------------------------------------------------------------------------------
 
+/// The font family used when font-weight/font-style are set without font-family.
+const DEFAULT_FONT: &str = "rbxasset://fonts/families/SourceSansPro.json";
+
 #[derive(Clone)]
 pub struct ApproxOptions {
     /// Already expanded (no `All`).
     pub groups: Vec<Group>,
-    pub luau: LuauOptions,
-    /// Font family asset used when font-weight/font-style are set without font-family.
-    pub default_font: String,
     /// Warn about CSS that compiles to a different layout than a browser gives it (`--strict`).
     pub strict: bool,
 }
@@ -124,19 +125,19 @@ pub struct Decl {
 #[derive(Default, Debug)]
 pub struct Translated {
     /// Roblox property name -> Luau expression, for the rule itself. Order = first produced.
-    pub props: Vec<(String, String)>,
+    pub props: Vec<(String, luau::Value)>,
     /// Pseudo-instance class name -> its properties. Order = first produced.
-    pub pseudo: Vec<(String, Vec<(String, String)>)>,
+    pub pseudo: Vec<(String, Vec<(String, luau::Value)>)>,
     /// Roblox property name (or "*" meaning the default transition) -> Luau TweenInfo expression.
-    pub transitions: Vec<(String, String)>,
+    pub transitions: Vec<(String, luau::TweenInfo)>,
     /// Transitions for properties of pseudo-instances (e.g. `transition: transform` animating
     /// `UIScale.Scale`): pseudo-instance class -> (property, TweenInfo expression). Emitted on the
     /// `<selector>::<Class>` rule by codegen.
-    pub pseudo_transitions: Vec<(String, Vec<(String, String)>)>,
+    pub pseudo_transitions: Vec<(String, Vec<(String, luau::TweenInfo)>)>,
 }
 
 impl Translated {
-    pub(crate) fn set_prop(&mut self, name: &str, expr: String) {
+    pub(crate) fn set_prop(&mut self, name: &str, expr: luau::Value) {
         if let Some(entry) = self.props.iter_mut().find(|(n, _)| n == name) {
             entry.1 = expr;
         } else {
@@ -144,7 +145,7 @@ impl Translated {
         }
     }
 
-    pub(crate) fn set_pseudo_prop(&mut self, class: &str, name: &str, expr: String) {
+    pub(crate) fn set_pseudo_prop(&mut self, class: &str, name: &str, expr: luau::Value) {
         let bucket = if let Some(pos) = self.pseudo.iter().position(|(n, _)| n == class) {
             &mut self.pseudo[pos].1
         } else {
@@ -159,7 +160,7 @@ impl Translated {
         }
     }
 
-    fn set_pseudo_transition(&mut self, class: &str, name: &str, expr: String) {
+    fn set_pseudo_transition(&mut self, class: &str, name: &str, expr: luau::TweenInfo) {
         let bucket = if let Some(pos) = self.pseudo_transitions.iter().position(|(n, _)| n == class) {
             &mut self.pseudo_transitions[pos].1
         } else {
@@ -173,7 +174,7 @@ impl Translated {
         }
     }
 
-    fn set_transition(&mut self, prop: &str, expr: String) {
+    fn set_transition(&mut self, prop: &str, expr: luau::TweenInfo) {
         if let Some(entry) = self.transitions.iter_mut().find(|(n, _)| n == prop) {
             entry.1 = expr;
         } else {
@@ -624,13 +625,13 @@ pub fn translate(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics) -
         translate_color_opacity(decls, opts, opacity_factor, diag, &mut out);
     }
     if opts.groups.contains(&Group::Text) {
-        translate_text(decls, opts, diag, &mut out);
+        translate_text(decls, diag, &mut out);
     }
     if opts.groups.contains(&Group::Size) {
         translate_size(decls, opts, diag, &mut out);
     }
     if opts.groups.contains(&Group::Position) {
-        translate_position(decls, opts, diag, &mut out);
+        translate_position(decls, diag, &mut out);
     }
     if opts.groups.contains(&Group::Box) {
         translate_box(decls, opts, opacity_factor, diag, &mut out);
@@ -689,7 +690,7 @@ fn warn_layout_differences(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diag
             let Some(d) = last(decls, max).filter(|d| !is(d, "none")) else { continue };
             let size = last(decls, axis);
             let automatic = !stretched
-                && size.is_none_or(|s| matches!(axis_length(&s.value, opts), Ok(AxisResult::Auto)))
+                && size.is_none_or(|s| matches!(axis_length(&s.value), Ok(AxisResult::Auto)))
                 && !(axis == "width" && size.is_none() && grows_from_zero);
             if scrolls {
                 diag.error(
@@ -713,7 +714,7 @@ fn warn_layout_differences(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diag
     }
 
     if opts.groups.contains(&Group::Text) {
-        let m = text_metrics(decls, opts);
+        let m = text_metrics(decls);
         if m.size.is_some() && m.family_ratio.is_none() {
             let d = decls.iter().rev().find(|d| matches!(d.name.as_str(), "font-size" | "font"));
             diag.error(
@@ -736,7 +737,7 @@ fn warn_layout_differences(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diag
         let sized = ["width", "height"]
             .iter()
             .filter_map(|n| last(decls, n))
-            .find(|d| matches!(axis_length(&d.value, opts), Ok(AxisResult::Value((s, o))) if s != 0.0 || o != 0.0));
+            .find(|d| matches!(axis_length(&d.value), Ok(AxisResult::Value((s, o))) if s != 0.0 || o != 0.0));
         let border_box = last(decls, "box-sizing").is_some_and(|d| is(d, "border-box"));
         if pads
             && !border_box
@@ -759,7 +760,7 @@ fn warn_layout_differences(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diag
             .is_some_and(|d| d.value.as_str().is_some_and(|s| s.to_ascii_lowercase().starts_with("column")));
         let cross = if column { "width" } else { "height" };
         let cross_decl = last(decls, cross);
-        let fits = cross_decl.is_some_and(|d| matches!(axis_length(&d.value, opts), Ok(AxisResult::Auto)));
+        let fits = cross_decl.is_some_and(|d| matches!(axis_length(&d.value), Ok(AxisResult::Auto)));
         // Roblox stretches items to the largest item on the line; CSS stretches them to the
         // container. The two agree only when the container is itself sized by its largest item: a
         // row with no height of its own, or a column that is `width: fit-content`.
@@ -835,21 +836,21 @@ fn unit_of(n: &Number) -> String {
 }
 
 /// Converts a length to a `(scale, offset)` pair suitable for `UDim`/`UDim2`.
-fn length_component(n: &Number, opts: &LuauOptions) -> Result<(f64, f64), String> {
+fn length_component(n: &Number) -> Result<(f64, f64), String> {
     let unit = unit_of(n);
     match unit.as_str() {
         "%" => Ok((n.value / 100.0, 0.0)),
         "vw" | "vh" | "vmin" | "vmax" => Err("viewport units have no Roblox equivalent".to_string()),
-        _ => length_px(n, opts).map(|px| (0.0, px)).ok_or_else(|| format!("unit `{unit}` has no Roblox equivalent")),
+        _ => length_px(n).map(|px| (0.0, px)).ok_or_else(|| format!("unit `{unit}` has no Roblox equivalent")),
     }
 }
 
 /// Converts a length to plain pixels (no percentage support).
-fn length_px(n: &Number, opts: &LuauOptions) -> Option<f64> {
+fn length_px(n: &Number) -> Option<f64> {
     let unit = unit_of(n);
     match unit.as_str() {
         "" | "px" => Some(n.value),
-        "em" | "rem" => Some(n.value * opts.rem_px),
+        "em" | "rem" => Some(n.value * roblox::REM_PX),
         _ => n.value_in("px"),
     }
 }
@@ -876,7 +877,7 @@ fn split_num_unit(tok: &str) -> Option<(f64, String)> {
 }
 
 /// Parses a simplified `calc()` expression text (e.g. `"50% + 10px"`) into `(scale, offset)`.
-fn parse_calc_text(text: &str, opts: &LuauOptions) -> Result<(f64, f64), String> {
+fn parse_calc_text(text: &str) -> Result<(f64, f64), String> {
     let s = strip_outer_parens(text);
     let mut scale = 0.0;
     let mut offset = 0.0;
@@ -891,7 +892,7 @@ fn parse_calc_text(text: &str, opts: &LuauOptions) -> Result<(f64, f64), String>
                     "" => return Err(format!("calc() term `{tok}` has no unit")),
                     "%" => scale += sign * val / 100.0,
                     "px" => offset += sign * val,
-                    "em" | "rem" => offset += sign * val * opts.rem_px,
+                    "em" | "rem" => offset += sign * val * roblox::REM_PX,
                     other => match Number::with_unit(val, other).value_in("px") {
                         Some(px) => offset += sign * px,
                         None => return Err(format!("unit `{other}` in calc() has no Roblox equivalent")),
@@ -905,26 +906,26 @@ fn parse_calc_text(text: &str, opts: &LuauOptions) -> Result<(f64, f64), String>
 }
 
 /// Converts a `Value` (a `Number` or a `calc()` call) into a `(scale, offset)` length pair.
-fn length_value(v: &Value, opts: &ApproxOptions) -> Result<(f64, f64), String> {
+fn length_value(v: &Value) -> Result<(f64, f64), String> {
     match v {
-        Value::Number(n) => length_component(n, &opts.luau),
+        Value::Number(n) => length_component(n),
         Value::Call { name, args } if name == "calc" => {
             let text = args.first().and_then(|a| a.as_str()).ok_or("calc() expects a single expression string")?;
-            parse_calc_text(text, &opts.luau)
+            parse_calc_text(text)
         }
         _ => Err(format!("unsupported length `{}`", v.inspect())),
     }
 }
 
 /// A plain pixel length (no percentages) for properties like `UIStroke.Thickness`.
-fn px_only(v: &Value, opts: &LuauOptions) -> Result<f64, String> {
+fn px_only(v: &Value) -> Result<f64, String> {
     match v {
         Value::Number(n) => {
             let unit = unit_of(n);
             if unit == "%" {
                 return Err("percentages aren't supported here".to_string());
             }
-            length_px(n, opts).ok_or_else(|| format!("unit `{unit}` has no Roblox equivalent"))
+            length_px(n).ok_or_else(|| format!("unit `{unit}` has no Roblox equivalent"))
         }
         _ => Err(format!("expected a length, got `{}`", v.inspect())),
     }
@@ -969,14 +970,14 @@ fn two_sides(v: &Value) -> (Value, Value) {
 
 /// Resolves a color value: a token reference (skips derived transparency, alpha = `None`), a
 /// `Value::Color`, or the `none` keyword (fully transparent black).
-fn resolve_color(v: &Value, opts: &LuauOptions) -> Result<(String, Option<f64>), String> {
-    if luau::token_reference(v).is_some() {
-        return Ok((luau::value(v, opts)?, None));
+fn resolve_color(v: &Value) -> Result<(luau::Value, Option<f64>), String> {
+    if let Some(token) = roblox::token_reference(v) {
+        return Ok((luau::Value::Token(token), None));
     }
     match v {
-        Value::Color(c) => Ok((luau::color3(c, opts.color_format), Some(c.a))),
+        Value::Color(c) => Ok((roblox::color3(c), Some(c.a))),
         Value::Str { text, quoted: false } if text.eq_ignore_ascii_case("none") => {
-            Ok((luau::color3(&Color::rgba(0.0, 0.0, 0.0, 1.0), opts.color_format), Some(0.0)))
+            Ok((roblox::color3(&Color::rgba(0.0, 0.0, 0.0, 1.0)), Some(0.0)))
         }
         _ => Err(format!("expected a color, got `{}`", v.inspect())),
     }
@@ -1049,8 +1050,8 @@ fn is_linear_gradient_call(v: &Value) -> bool {
     matches!(v, Value::Call { name, .. } if name == "linear-gradient" || name == "repeating-linear-gradient")
 }
 
-fn white(opts: &ApproxOptions) -> String {
-    luau::color3(&Color::rgba(255.0, 255.0, 255.0, 1.0), opts.luau.color_format)
+fn white() -> luau::Value {
+    roblox::color3(&Color::rgba(255.0, 255.0, 255.0, 1.0))
 }
 
 fn translate_color_opacity(
@@ -1078,7 +1079,7 @@ fn translate_color_opacity(
             if clip_text && is_clear(&d.value) {
                 // Part of the gradient-text idiom; the gradient provides the colour.
             } else {
-                match resolve_color(&d.value, &opts.luau) {
+                match resolve_color(&d.value) {
                     Ok((expr, alpha)) => {
                         out.set_prop("TextColor3", expr);
                         have_text = true;
@@ -1091,13 +1092,13 @@ fn translate_color_opacity(
             }
         }
         if clip_text {
-            out.set_prop("TextColor3", white(opts));
+            out.set_prop("TextColor3", white());
             have_text = true;
             text_alpha = 1.0;
         }
     }
     if have_text || opacity_factor.is_some() {
-        out.set_prop("TextTransparency", luau::number(compute_transparency(text_alpha, opacity_factor)));
+        out.set_prop("TextTransparency", luau::Value::Number(compute_transparency(text_alpha, opacity_factor)));
     }
 
     // BackgroundColor3 / BackgroundTransparency / UIGradient / Image
@@ -1128,7 +1129,7 @@ fn translate_color_opacity(
                 have_bg = true;
                 bg_alpha = 0.0;
             } else {
-                match resolve_color(value, &opts.luau) {
+                match resolve_color(value) {
                     Ok((expr, alpha)) => {
                         out.set_prop("BackgroundColor3", expr);
                         have_bg = true;
@@ -1163,7 +1164,7 @@ fn translate_color_opacity(
             && name == "url"
             && let Some(text) = args.first().and_then(|a| a.as_str())
         {
-            out.set_prop("Image", luau::string(text));
+            out.set_prop("Image", luau::Value::String(text.to_string()));
         }
 
         if let Some(d) = last(decls, "mask-image").or_else(|| last(decls, "mask")) {
@@ -1220,19 +1221,19 @@ fn translate_color_opacity(
                 gradient_span.as_ref(),
             );
         }
-        out.set_prop("BackgroundColor3", white(opts));
+        out.set_prop("BackgroundColor3", white());
         have_bg = true;
         bg_alpha = 1.0;
     }
     if gradient.is_some() || mask.is_some() {
         if let Some(g) = &gradient {
-            out.set_pseudo_prop("UIGradient", "Color", g.color_sequence(opts));
+            out.set_pseudo_prop("UIGradient", "Color", g.color_sequence());
         }
         if let Some(t) = transparency_sequence(gradient.as_ref(), mask.as_ref()) {
             out.set_pseudo_prop("UIGradient", "Transparency", t);
         }
         let px = |name: &str| {
-            last(decls, name).and_then(|d| match axis_length(&d.value, opts) {
+            last(decls, name).and_then(|d| match axis_length(&d.value) {
                 Ok(AxisResult::Value((s, o))) if s == 0.0 && o > 0.0 => Some(o),
                 _ => None,
             })
@@ -1248,7 +1249,7 @@ fn translate_color_opacity(
                             "a `{}deg` gradient's direction depends on the element's shape: a UIGradient is rotated \
                              as if its element were square, so without a px `width` and `height` outlass assumes \
                              one; give it px sizes, or use a right angle or a `to right`-style direction",
-                            luau::number(g.angle.unwrap_or_default())
+                            crate::value::format_number(g.angle.unwrap_or_default())
                         ),
                         gradient_span.as_ref(),
                     );
@@ -1257,20 +1258,20 @@ fn translate_color_opacity(
             }
             None => 0.0,
         };
-        out.set_pseudo_prop("UIGradient", "Rotation", luau::number(rotation));
+        out.set_pseudo_prop("UIGradient", "Rotation", luau::Value::Number(rotation));
     }
 
     if clip_text {
-        out.set_prop("BackgroundTransparency", "1".to_string());
+        out.set_prop("BackgroundTransparency", luau::Value::Number(1.0));
     } else if have_bg {
         // Without a known background there's nothing for `opacity` to scale: CSS fades whatever
         // background the element has, and guessing an opaque one here would paint over a weaker
         // rule's `background-color: transparent`.
-        out.set_prop("BackgroundTransparency", luau::number(compute_transparency(bg_alpha, opacity_factor)));
+        out.set_prop("BackgroundTransparency", luau::Value::Number(compute_transparency(bg_alpha, opacity_factor)));
     }
 
     if opacity_on && let Some(of) = opacity_factor {
-        let t = luau::number((1.0 - of).clamp(0.0, 1.0));
+        let t = luau::Value::Number((1.0 - of).clamp(0.0, 1.0));
         // ImageTransparency: only opacity drives this (no "image color" concept in CSS).
         out.set_prop("ImageTransparency", t.clone());
         // On a CanvasGroup this fades the element and its children together, exactly like CSS opacity.
@@ -1336,15 +1337,10 @@ impl Gradient {
 }
 
 impl Gradient {
-    fn color_sequence(&self, opts: &ApproxOptions) -> String {
-        let keypoints: Vec<String> = self
-            .stops
-            .iter()
-            .map(|(p, c)| {
-                format!("ColorSequenceKeypoint.new({}, {})", luau::number(*p), luau::color3(c, opts.luau.color_format))
-            })
-            .collect();
-        format!("ColorSequence.new({{{}}})", keypoints.join(", "))
+    fn color_sequence(&self) -> luau::Value {
+        luau::Value::ColorSequence(
+            self.stops.iter().map(|(p, c)| (*p, luau::Color3 { r: c.r, g: c.g, b: c.b })).collect(),
+        )
     }
 
     fn has_alpha(&self) -> bool {
@@ -1366,7 +1362,7 @@ impl Gradient {
 }
 
 /// `UIGradient.Transparency` combining a background gradient's own alpha with a mask's alpha.
-fn transparency_sequence(gradient: Option<&Gradient>, mask: Option<&Gradient>) -> Option<String> {
+fn transparency_sequence(gradient: Option<&Gradient>, mask: Option<&Gradient>) -> Option<luau::Value> {
     let sources: Vec<&Gradient> = [gradient.filter(|g| g.has_alpha()), mask].into_iter().flatten().collect();
     if sources.is_empty() {
         return None;
@@ -1392,13 +1388,9 @@ fn transparency_sequence(gradient: Option<&Gradient>, mask: Option<&Gradient>) -
         let held = keypoints[MAX_KEYPOINTS - 2].1;
         keypoints.push((1.0, held));
     }
-    let keypoints: Vec<String> = keypoints
-        .iter()
-        .map(|(p, alpha)| {
-            format!("NumberSequenceKeypoint.new({}, {})", luau::number(*p), luau::number((1.0 - alpha).clamp(0.0, 1.0)))
-        })
-        .collect();
-    Some(format!("NumberSequence.new({{{}}})", keypoints.join(", ")))
+    Some(luau::Value::NumberSequence(
+        keypoints.iter().map(|(p, alpha)| (*p, (1.0 - alpha).clamp(0.0, 1.0), 0.0)).collect(),
+    ))
 }
 
 /// The colour a stop list shows at `position`, clamped at both ends. Where two stops share a
@@ -1892,7 +1884,7 @@ fn edit_distance(a: &str, b: &str) -> usize {
 /// and the default font stands in when none does. Uploaded fonts (`rbxassetid://`) and other
 /// asset paths are taken as given; a name that isn't a built-in Roblox family is warned about,
 /// since Roblox would silently draw its fallback font instead.
-fn resolve_families(families: &[String], opts: &ApproxOptions, diag: &mut Diagnostics, span: Option<&Span>) -> String {
+fn resolve_families(families: &[String], diag: &mut Diagnostics, span: Option<&Span>) -> String {
     let mut missing: Vec<&str> = Vec::new();
     let mut chosen = None;
     for name in families {
@@ -1902,7 +1894,7 @@ fn resolve_families(families: &[String], opts: &ApproxOptions, diag: &mut Diagno
             Some(name.clone())
         } else {
             match name.to_ascii_lowercase().as_str() {
-                "sans-serif" | "system-ui" | "ui-sans-serif" => Some(opts.default_font.clone()),
+                "sans-serif" | "system-ui" | "ui-sans-serif" => Some(DEFAULT_FONT.to_string()),
                 "serif" | "ui-serif" => Some(format!("{FAMILIES_PREFIX}Merriweather.json")),
                 "monospace" | "ui-monospace" => Some(format!("{FAMILIES_PREFIX}RobotoMono.json")),
                 _ => builtin_family(name).map(|f| format!("{FAMILIES_PREFIX}{f}.json")),
@@ -1942,17 +1934,17 @@ fn resolve_families(families: &[String], opts: &ApproxOptions, diag: &mut Diagno
             span,
         );
     }
-    chosen.map_or_else(|| opts.default_font.clone(), |(_, asset)| asset)
+    chosen.map_or_else(|| DEFAULT_FONT.to_string(), |(_, asset)| asset)
 }
 
-fn font_size_value(v: &Value, opts: &ApproxOptions) -> Result<f64, String> {
+fn font_size_value(v: &Value) -> Result<f64, String> {
     match v {
         Value::Number(n) => {
             let unit = unit_of(n);
             match unit.as_str() {
                 "" | "px" => Ok(n.value),
-                "em" | "rem" => Ok(n.value * opts.luau.rem_px),
-                "%" => Ok(opts.luau.rem_px * n.value / 100.0),
+                "em" | "rem" => Ok(n.value * roblox::REM_PX),
+                "%" => Ok(roblox::REM_PX * n.value / 100.0),
                 _ => n.value_in("px").ok_or_else(|| format!("unit `{unit}` has no Roblox equivalent")),
             }
         }
@@ -1964,12 +1956,7 @@ fn font_size_value(v: &Value, opts: &ApproxOptions) -> Result<f64, String> {
 type FontShorthand = (Option<&'static str>, Option<&'static str>, Option<String>, Option<f64>, Option<f64>);
 
 /// Parses the `font` shorthand: `[style] [weight] size[/line-height] family`.
-fn parse_font_shorthand(
-    v: &Value,
-    opts: &ApproxOptions,
-    diag: &mut Diagnostics,
-    span: Option<&Span>,
-) -> Result<FontShorthand, String> {
+fn parse_font_shorthand(v: &Value, diag: &mut Diagnostics, span: Option<&Span>) -> Result<FontShorthand, String> {
     // `bold 20px "Inter", sans-serif`: the fallback families come after the first comma.
     let (head, fallbacks): (Value, Vec<String>) = match v {
         Value::List { items, sep: ListSep::Comma, .. } if !items.is_empty() => {
@@ -1995,7 +1982,7 @@ fn parse_font_shorthand(
         if let Value::List { items: parts, sep: ListSep::Slash, .. } = item
             && let (Some(sz), Some(lh)) = (parts.first(), parts.get(1))
         {
-            size = Some(font_size_value(sz, opts)?);
+            size = Some(font_size_value(sz)?);
             line_height = match lh {
                 Value::Number(n) if n.is_unitless() => Some(n.value),
                 Value::Number(n) if n.has_unit("%") => Some(n.value / 100.0),
@@ -2012,7 +1999,7 @@ fn parse_font_shorthand(
             if is_weight_like {
                 weight = Some(nearest_weight(n.value));
             } else {
-                size = Some(font_size_value(item, opts)?);
+                size = Some(font_size_value(item)?);
                 past_size = true;
             }
             continue;
@@ -2038,7 +2025,7 @@ fn parse_font_shorthand(
     }
     let family = (!family_words.is_empty()).then(|| {
         let families: Vec<String> = std::iter::once(family_words.join(" ")).chain(fallbacks).collect();
-        resolve_families(&families, opts, diag, span)
+        resolve_families(&families, diag, span)
     });
     Ok((weight, style, family, size, line_height))
 }
@@ -2065,7 +2052,7 @@ impl TextMetrics {
     }
 }
 
-fn text_metrics(decls: &[Decl], opts: &ApproxOptions) -> TextMetrics {
+fn text_metrics(decls: &[Decl]) -> TextMetrics {
     enum LineHeight {
         Ratio(f64),
         /// Resolved against the final font size.
@@ -2079,17 +2066,16 @@ fn text_metrics(decls: &[Decl], opts: &ApproxOptions) -> TextMetrics {
     let mut any_font = false;
     for d in decls {
         match strip_vendor_prefix(&d.name) {
-            "font-size" => size = font_size_value(&d.value, opts).ok().or(size),
+            "font-size" => size = font_size_value(&d.value).ok().or(size),
             "font-family" => {
                 let families = family_texts(&d.value);
                 if !families.is_empty() {
-                    family = Some(resolve_families(&families, opts, &mut Diagnostics::default(), None));
+                    family = Some(resolve_families(&families, &mut Diagnostics::default(), None));
                 }
             }
             "font-weight" | "font-style" => any_font = true,
             "font" => {
-                if let Ok((_, _, fam, sz, lh)) = parse_font_shorthand(&d.value, opts, &mut Diagnostics::default(), None)
-                {
+                if let Ok((_, _, fam, sz, lh)) = parse_font_shorthand(&d.value, &mut Diagnostics::default(), None) {
                     size = sz.or(size);
                     family = fam.or(family);
                     any_font = true;
@@ -2101,7 +2087,7 @@ fn text_metrics(decls: &[Decl], opts: &ApproxOptions) -> TextMetrics {
                 line_height = Some(match &d.value {
                     Value::Number(n) if n.is_unitless() => LineHeight::Ratio(n.value),
                     Value::Number(n) if n.has_unit("%") => LineHeight::Ratio(n.value / 100.0),
-                    Value::Number(n) => length_px(n, &opts.luau).map_or(LineHeight::Normal, LineHeight::Px),
+                    Value::Number(n) => length_px(n).map_or(LineHeight::Normal, LineHeight::Px),
                     _ => LineHeight::Normal,
                 })
             }
@@ -2113,7 +2099,7 @@ fn text_metrics(decls: &[Decl], opts: &ApproxOptions) -> TextMetrics {
         Some(LineHeight::Px(px)) => size.filter(|s| *s > 0.0).map(|s| px / s),
         _ => None,
     };
-    let family = family.or_else(|| any_font.then(|| opts.default_font.clone()));
+    let family = family.or_else(|| any_font.then(|| DEFAULT_FONT.to_string()));
     TextMetrics { size, line_height: ratio, family_ratio: family.as_deref().and_then(family_line_ratio) }
 }
 
@@ -2123,14 +2109,14 @@ fn text_metrics(decls: &[Decl], opts: &ApproxOptions) -> TextMetrics {
 /// (top, bottom) padding for that, when both are known. Roblox rounds padding to whole pixels, so
 /// the leading is split into whole pixels that add up to it (a -3px leading as -1.5 each would
 /// lose a pixel).
-fn half_leading(decls: &[Decl], opts: &ApproxOptions) -> Option<(f64, f64)> {
-    let m = text_metrics(decls, opts);
+fn half_leading(decls: &[Decl]) -> Option<(f64, f64)> {
+    let m = text_metrics(decls);
     let leading = (m.line_px()? - m.text_size()?).round();
     let top = (leading / 2.0).floor();
     (leading != 0.0).then_some((top, leading - top))
 }
 
-fn translate_text(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, out: &mut Translated) {
+fn translate_text(decls: &[Decl], diag: &mut Diagnostics, out: &mut Translated) {
     let mut weight: Option<&'static str> = None;
     let mut style: Option<&'static str> = None;
     let mut family: Option<String> = None;
@@ -2141,7 +2127,7 @@ fn translate_text(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, 
 
     for d in decls {
         match strip_vendor_prefix(&d.name) {
-            "font-size" => match font_size_value(&d.value, opts) {
+            "font-size" => match font_size_value(&d.value) {
                 Ok(px) => font_size_px = Some(px),
                 Err(e) => diag.warn(format!("`font-size`: {e} (ignored)"), d.span.as_ref()),
             },
@@ -2150,7 +2136,7 @@ fn translate_text(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, 
                 if families.is_empty() {
                     diag.warn("`font-family`: unsupported value (ignored)", d.span.as_ref());
                 } else {
-                    family = Some(resolve_families(&families, opts, diag, d.span.as_ref()));
+                    family = Some(resolve_families(&families, diag, d.span.as_ref()));
                     have_font = true;
                 }
             }
@@ -2168,7 +2154,7 @@ fn translate_text(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, 
                 }
                 Err(e) => diag.warn(format!("`font-style`: {e} (ignored)"), d.span.as_ref()),
             },
-            "font" => match parse_font_shorthand(&d.value, opts, diag, d.span.as_ref()) {
+            "font" => match parse_font_shorthand(&d.value, diag, d.span.as_ref()) {
                 // The size and line-height become TextSize and LineHeight after the loop.
                 Ok((w, s, fam, sz, _)) => {
                     if let Some(w) = w {
@@ -2200,7 +2186,7 @@ fn translate_text(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, 
                         _ => None,
                     };
                     match e {
-                        Some(e) => out.set_prop("TextXAlignment", format!("Enum.TextXAlignment.{e}")),
+                        Some(e) => out.set_prop("TextXAlignment", luau::Value::enum_item("TextXAlignment", e)),
                         None => diag.warn(format!("unknown `text-align: {s}` (ignored)"), d.span.as_ref()),
                     }
                 }
@@ -2215,7 +2201,7 @@ fn translate_text(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, 
                         _ => None,
                     };
                     match e {
-                        Some(e) => out.set_prop("TextYAlignment", format!("Enum.TextYAlignment.{e}")),
+                        Some(e) => out.set_prop("TextYAlignment", luau::Value::enum_item("TextYAlignment", e)),
                         None => diag.warn(format!("unknown `vertical-align: {s}` (ignored)"), d.span.as_ref()),
                     }
                 }
@@ -2236,7 +2222,7 @@ fn translate_text(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, 
                         _ => None,
                     };
                     match e {
-                        Some(e) => out.set_prop("TextYAlignment", format!("Enum.TextYAlignment.{e}")),
+                        Some(e) => out.set_prop("TextYAlignment", luau::Value::enum_item("TextYAlignment", e)),
                         None => diag.warn(format!("unsupported `align-content: {s}` (ignored)"), d.span.as_ref()),
                     }
                 }
@@ -2245,7 +2231,7 @@ fn translate_text(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, 
             "line-height" => match &d.value {
                 Value::Number(n) if n.is_unitless() || n.has_unit("%") => {}
                 Value::Number(n) => {
-                    let px = length_px(n, &opts.luau);
+                    let px = length_px(n);
                     match (px, last(decls, "font-size").or(last(decls, "font")).and(font_size_px)) {
                         (Some(_), Some(fs)) if fs > 0.0 => {}
                         _ => diag.warn(
@@ -2263,9 +2249,9 @@ fn translate_text(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, 
                 if let Some(s) = d.value.as_str() {
                     let lower = s.to_ascii_lowercase();
                     match lower.as_str() {
-                        "nowrap" | "pre" => out.set_prop("TextWrapped", "false".to_string()),
+                        "nowrap" | "pre" => out.set_prop("TextWrapped", luau::Value::Bool(false)),
                         "normal" | "pre-wrap" | "pre-line" | "break-spaces" => {
-                            out.set_prop("TextWrapped", "true".to_string())
+                            out.set_prop("TextWrapped", luau::Value::Bool(true))
                         }
                         _ => diag.warn(format!("unknown `white-space: {s}` (ignored)"), d.span.as_ref()),
                     }
@@ -2274,8 +2260,8 @@ fn translate_text(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, 
             "text-wrap" => {
                 if let Some(s) = d.value.as_str() {
                     match s.to_ascii_lowercase().as_str() {
-                        "wrap" => out.set_prop("TextWrapped", "true".to_string()),
-                        "nowrap" => out.set_prop("TextWrapped", "false".to_string()),
+                        "wrap" => out.set_prop("TextWrapped", luau::Value::Bool(true)),
+                        "nowrap" => out.set_prop("TextWrapped", luau::Value::Bool(false)),
                         _ => diag.warn(format!("unknown `text-wrap: {s}` (ignored)"), d.span.as_ref()),
                     }
                 }
@@ -2283,7 +2269,7 @@ fn translate_text(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, 
             // CSS Generated Content lets `content` replace an element's content; for a text object
             // that's its Text.
             "content" => match &d.value {
-                Value::Str { text, quoted: true } => out.set_prop("Text", luau::string(text)),
+                Value::Str { text, quoted: true } => out.set_prop("Text", luau::Value::String(text.clone())),
                 Value::Str { text, quoted: false } if text == "none" || text == "normal" => {}
                 other => diag.warn(
                     format!("`content: {}`: only a string is supported (ignored)", other.inspect()),
@@ -2293,8 +2279,8 @@ fn translate_text(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, 
             "text-overflow" => {
                 if let Some(s) = d.value.as_str() {
                     match s.to_ascii_lowercase().as_str() {
-                        "ellipsis" => out.set_prop("TextTruncate", "Enum.TextTruncate.AtEnd".to_string()),
-                        "clip" => out.set_prop("TextTruncate", "Enum.TextTruncate.None".to_string()),
+                        "ellipsis" => out.set_prop("TextTruncate", luau::Value::enum_item("TextTruncate", "AtEnd")),
+                        "clip" => out.set_prop("TextTruncate", luau::Value::enum_item("TextTruncate", "None")),
                         _ => diag.warn(format!("unknown `text-overflow: {s}` (ignored)"), d.span.as_ref()),
                     }
                 }
@@ -2323,13 +2309,13 @@ fn translate_text(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, 
     }
 
     if stroke_present {
-        text_stroke(&stroke, decls, opts, diag, out);
+        text_stroke(&stroke, decls, diag, out);
     }
 
     // TextSize is a line's height and CSS's font-size the em (see FAMILY_LINE_RATIOS). LineHeight
     // then spaces each following line one CSS line box apart; the first line's half-leading is
     // padding (see half_leading).
-    let metrics = text_metrics(decls, opts);
+    let metrics = text_metrics(decls);
     if let Some(size) = metrics.text_size() {
         if metrics.size.zip(metrics.family_ratio).is_some_and(|(s, r)| s * r > MAX_TEXT_SIZE + 0.5)
             && let Some(d) = decls.iter().rev().find(|d| d.name == "font-size" || d.name == "font")
@@ -2341,7 +2327,7 @@ fn translate_text(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, 
                 d.span.as_ref(),
             );
         }
-        out.set_prop("TextSize", luau::number(size));
+        out.set_prop("TextSize", luau::Value::Number(size));
     }
     let line_height = match (metrics.line_px(), metrics.text_size()) {
         (Some(px), Some(size)) if size > 0.0 => Some(px / size),
@@ -2358,22 +2344,25 @@ fn translate_text(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, 
                 d.span.as_ref(),
             );
         }
-        out.set_prop("LineHeight", luau::number(lh.min(3.0)));
+        out.set_prop("LineHeight", luau::Value::Number(lh.min(3.0)));
     }
 
     if have_font {
         let w = weight.unwrap_or("Regular");
         let s = style.unwrap_or("Normal");
-        let fam = family.unwrap_or_else(|| opts.default_font.clone());
-        out.set_prop("FontFace", format!("Font.new({}, Enum.FontWeight.{w}, Enum.FontStyle.{s})", luau::string(&fam)));
+        let fam = family.unwrap_or_else(|| DEFAULT_FONT.to_string());
+        out.set_prop(
+            "FontFace",
+            luau::Value::Font { family: fam, weight: Some(w.to_string()), style: Some(s.to_string()) },
+        );
     }
 }
 
 /// `-webkit-text-stroke` as a `::UIStroke` drawn around the glyphs. An omitted color is
 /// `currentColor`, which for a text object is its own `color`.
-fn text_stroke(st: &StrokeState, decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, out: &mut Translated) {
+fn text_stroke(st: &StrokeState, decls: &[Decl], diag: &mut Diagnostics, out: &mut Translated) {
     let width = match &st.width {
-        Some(w) => match px_only(w, &opts.luau) {
+        Some(w) => match px_only(w) {
             Ok(px) => px,
             Err(e) => {
                 diag.warn(format!("`-webkit-text-stroke`: {e} (ignored)"), st.span.as_ref());
@@ -2387,7 +2376,7 @@ fn text_stroke(st: &StrokeState, decls: &[Decl], opts: &ApproxOptions, diag: &mu
     };
     // CSS draws nothing at width 0; an explicit Enabled = false also undoes a weaker rule's stroke.
     if width == 0.0 {
-        out.set_pseudo_prop("UIStroke", "Enabled", "false".to_string());
+        out.set_pseudo_prop("UIStroke", "Enabled", luau::Value::Bool(false));
         return;
     }
     let current_color = || last(decls, "text-fill-color").or_else(|| last(decls, "color")).map(|d| d.value.clone());
@@ -2399,14 +2388,14 @@ fn text_stroke(st: &StrokeState, decls: &[Decl], opts: &ApproxOptions, diag: &mu
         return;
     };
     // Explicit, so a lower-priority `border: none` can't switch the outline off.
-    out.set_pseudo_prop("UIStroke", "Enabled", "true".to_string());
-    out.set_pseudo_prop("UIStroke", "ApplyStrokeMode", "Enum.ApplyStrokeMode.Contextual".to_string());
-    out.set_pseudo_prop("UIStroke", "Thickness", luau::number(width));
-    match resolve_color(&color, &opts.luau) {
+    out.set_pseudo_prop("UIStroke", "Enabled", luau::Value::Bool(true));
+    out.set_pseudo_prop("UIStroke", "ApplyStrokeMode", luau::Value::enum_item("ApplyStrokeMode", "Contextual"));
+    out.set_pseudo_prop("UIStroke", "Thickness", luau::Value::Number(width));
+    match resolve_color(&color) {
         Ok((expr, alpha)) => {
             out.set_pseudo_prop("UIStroke", "Color", expr);
             if let Some(a) = alpha {
-                out.set_pseudo_prop("UIStroke", "Transparency", luau::number(compute_transparency(a, None)));
+                out.set_pseudo_prop("UIStroke", "Transparency", luau::Value::Number(compute_transparency(a, None)));
             }
         }
         Err(e) => diag.warn(format!("`-webkit-text-stroke`: {e} (ignored)"), st.span.as_ref()),
@@ -2422,7 +2411,7 @@ enum AxisResult {
     Auto,
 }
 
-fn axis_length(v: &Value, opts: &ApproxOptions) -> Result<AxisResult, String> {
+fn axis_length(v: &Value) -> Result<AxisResult, String> {
     if let Some(s) = v.as_str() {
         let l = s.to_ascii_lowercase();
         if matches!(l.as_str(), "auto" | "fit-content" | "max-content" | "min-content") {
@@ -2435,14 +2424,14 @@ fn axis_length(v: &Value, opts: &ApproxOptions) -> Result<AxisResult, String> {
             if matches!(unit.as_str(), "vw" | "vh" | "vmin" | "vmax") {
                 return Err("viewport units have no Roblox equivalent".to_string());
             }
-            length_component(n, &opts.luau).map(AxisResult::Value)
+            length_component(n).map(AxisResult::Value)
         }
-        Value::Call { name, .. } if name == "calc" => length_value(v, opts).map(AxisResult::Value),
+        Value::Call { name, .. } if name == "calc" => length_value(v).map(AxisResult::Value),
         _ => Err(format!("unsupported size value `{}`", v.inspect())),
     }
 }
 
-fn max_length_px(d: Option<&Decl>, opts: &ApproxOptions, diag: &mut Diagnostics) -> f64 {
+fn max_length_px(d: Option<&Decl>, diag: &mut Diagnostics) -> f64 {
     let Some(d) = d else { return f64::INFINITY };
     if let Some(s) = d.value.as_str()
         && s.eq_ignore_ascii_case("none")
@@ -2458,7 +2447,7 @@ fn max_length_px(d: Option<&Decl>, opts: &ApproxOptions, diag: &mut Diagnostics)
                     diag.warn("percentage min/max size constraints aren't supported (ignored)", d.span.as_ref());
                     f64::INFINITY
                 }
-                _ => length_px(n, &opts.luau).unwrap_or_else(|| {
+                _ => length_px(n).unwrap_or_else(|| {
                     diag.warn(format!("unit `{unit}` has no Roblox equivalent (ignored)"), d.span.as_ref());
                     f64::INFINITY
                 }),
@@ -2471,7 +2460,7 @@ fn max_length_px(d: Option<&Decl>, opts: &ApproxOptions, diag: &mut Diagnostics)
     }
 }
 
-fn min_length_px(d: Option<&Decl>, opts: &ApproxOptions, diag: &mut Diagnostics) -> f64 {
+fn min_length_px(d: Option<&Decl>, diag: &mut Diagnostics) -> f64 {
     let Some(d) = d else { return 0.0 };
     match &d.value {
         Value::Number(n) => {
@@ -2482,7 +2471,7 @@ fn min_length_px(d: Option<&Decl>, opts: &ApproxOptions, diag: &mut Diagnostics)
                     diag.warn("percentage min/max size constraints aren't supported (ignored)", d.span.as_ref());
                     0.0
                 }
-                _ => length_px(n, &opts.luau).unwrap_or_else(|| {
+                _ => length_px(n).unwrap_or_else(|| {
                     diag.warn(format!("unit `{unit}` has no Roblox equivalent (ignored)"), d.span.as_ref());
                     0.0
                 }),
@@ -2520,14 +2509,14 @@ fn translate_size(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, 
             d.span.as_ref(),
         );
     }
-    let fits = |d: Option<&Decl>| d.is_some_and(|d| matches!(axis_length(&d.value, opts), Ok(AxisResult::Auto)));
+    let fits = |d: Option<&Decl>| d.is_some_and(|d| matches!(axis_length(&d.value), Ok(AxisResult::Auto)));
     let sized = |d: Option<&Decl>, stretch: Option<(f64, f64)>| stretch.is_some() || (d.is_some() && !fits(d));
     if (fits(w) || fits(h)) && !sized(w, stretch_x) && !sized(h, stretch_y) {
         // Only `fit-content`/`auto` axes, and no length for either axis anywhere in the cascade:
         // the element is sized by its content on both. AutomaticSize only ever grows an element
         // past its Size, so the Size is zeroed too, or a weaker rule's size would stay as a floor.
-        out.set_prop("Size", luau::udim2(0.0, 0.0, 0.0, 0.0));
-        out.set_prop("AutomaticSize", "Enum.AutomaticSize.XY".to_string());
+        out.set_prop("Size", luau::Value::udim2(0.0, 0.0, 0.0, 0.0));
+        out.set_prop("AutomaticSize", luau::Value::enum_item("AutomaticSize", "XY"));
     } else if w.is_some() || h.is_some() || stretch_x.is_some() || stretch_y.is_some() {
         let x_given = w.is_some() || stretch_x.is_some();
         let y_given = h.is_some() || stretch_y.is_some();
@@ -2552,7 +2541,7 @@ fn translate_size(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, 
         let mut auto_x = false;
         let mut auto_y = false;
         match w {
-            Some(d) => match axis_length(&d.value, opts) {
+            Some(d) => match axis_length(&d.value) {
                 Ok(AxisResult::Value((s, o))) => {
                     xs = s;
                     xo = o;
@@ -2570,7 +2559,7 @@ fn translate_size(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, 
             },
         }
         match h {
-            Some(d) => match axis_length(&d.value, opts) {
+            Some(d) => match axis_length(&d.value) {
                 Ok(AxisResult::Value((s, o))) => {
                     ys = s;
                     yo = o;
@@ -2587,7 +2576,7 @@ fn translate_size(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, 
                 None => auto_y = true,
             },
         }
-        out.set_prop("Size", luau::udim2(xs, xo, ys, yo));
+        out.set_prop("Size", luau::Value::udim2(xs, xo, ys, yo));
         // `None` matters as much as the rest: text elements are content-sized by default, and a CSS
         // length turns that off for the axis it fixes.
         let automatic = match (auto_x, auto_y) {
@@ -2596,7 +2585,7 @@ fn translate_size(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, 
             (false, true) => "Y",
             (false, false) => "None",
         };
-        out.set_prop("AutomaticSize", format!("Enum.AutomaticSize.{automatic}"));
+        out.set_prop("AutomaticSize", luau::Value::enum_item("AutomaticSize", automatic));
     }
 
     // A stretching flex line (the CSS default) stretches only items whose cross size is `auto`,
@@ -2622,14 +2611,14 @@ fn translate_size(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, 
     let maxw = last(decls, "max-width");
     let maxh = last(decls, "max-height");
     if minw.is_some() || minh.is_some() || maxw.is_some() || maxh.is_some() || fixed_px != (None, None) {
-        let minw_v = min_length_px(minw, opts, diag);
-        let minh_v = min_length_px(minh, opts, diag);
-        let maxw_v = max_length_px(maxw, opts, diag).min(fixed_px.0.unwrap_or(f64::INFINITY)).max(minw_v);
-        let maxh_v = max_length_px(maxh, opts, diag).min(fixed_px.1.unwrap_or(f64::INFINITY)).max(minh_v);
+        let minw_v = min_length_px(minw, diag);
+        let minh_v = min_length_px(minh, diag);
+        let maxw_v = max_length_px(maxw, diag).min(fixed_px.0.unwrap_or(f64::INFINITY)).max(minw_v);
+        let maxh_v = max_length_px(maxh, diag).min(fixed_px.1.unwrap_or(f64::INFINITY)).max(minh_v);
         if minw.is_some() || minh.is_some() {
-            out.set_pseudo_prop("UISizeConstraint", "MinSize", luau::vector2(minw_v, minh_v));
+            out.set_pseudo_prop("UISizeConstraint", "MinSize", luau::Value::Vector2(minw_v, minh_v));
         }
-        out.set_pseudo_prop("UISizeConstraint", "MaxSize", luau::vector2(maxw_v, maxh_v));
+        out.set_pseudo_prop("UISizeConstraint", "MaxSize", luau::Value::Vector2(maxw_v, maxh_v));
     }
 
     if let Some(d) = last(decls, "aspect-ratio") {
@@ -2649,7 +2638,7 @@ fn translate_size(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, 
                 _ => None,
             };
             match ratio {
-                Some(r) => out.set_pseudo_prop("UIAspectRatioConstraint", "AspectRatio", luau::number(r)),
+                Some(r) => out.set_pseudo_prop("UIAspectRatioConstraint", "AspectRatio", luau::Value::Number(r)),
                 None => {
                     diag.warn(format!("unsupported `aspect-ratio: {}` (ignored)", d.value.inspect()), d.span.as_ref())
                 }
@@ -2718,13 +2707,13 @@ impl Margin {
 }
 
 /// The effective margins (top, right, bottom, left), from the shorthand and longhands in source order.
-fn margins(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics) -> [Option<Margin>; 4] {
+fn margins(decls: &[Decl], diag: &mut Diagnostics) -> [Option<Margin>; 4] {
     let mut sides: [Option<Margin>; 4] = [None; 4];
     let mut side = |v: &Value, d: &Decl| -> Option<Margin> {
         if v.as_str().is_some_and(|s| s.eq_ignore_ascii_case("auto")) {
             return Some(Margin::Auto);
         }
-        match length_value(v, opts) {
+        match length_value(v) {
             Ok(l) => Some(Margin::Length(l)),
             Err(e) => {
                 diag.warn(format!("`{}`: {e} (ignored)", d.name), d.span.as_ref());
@@ -2766,10 +2755,10 @@ fn stretched_size(decls: &[Decl], opts: &ApproxOptions) -> (Option<Length>, Opti
     }
     let e = edges(decls);
     // Margins inset the stretched element further (translate_position reports their errors).
-    let [mt, mr, mb, ml] = margins(decls, opts, &mut Diagnostics::default());
+    let [mt, mr, mb, ml] = margins(decls, &mut Diagnostics::default());
     let between = |a: &Option<Value>, b: &Option<Value>, ma: Option<Margin>, mb: Option<Margin>| {
-        let (a_scale, a_offset) = length_value(a.as_ref()?, opts).ok()?;
-        let (b_scale, b_offset) = length_value(b.as_ref()?, opts).ok()?;
+        let (a_scale, a_offset) = length_value(a.as_ref()?).ok()?;
+        let (b_scale, b_offset) = length_value(b.as_ref()?).ok()?;
         let ((ma_scale, ma_offset), (mb_scale, mb_offset)) = (Margin::length(ma), Margin::length(mb));
         Some((1.0 - a_scale - b_scale - ma_scale - mb_scale, -a_offset - b_offset - ma_offset - mb_offset))
     };
@@ -2778,7 +2767,7 @@ fn stretched_size(decls: &[Decl], opts: &ApproxOptions) -> (Option<Length>, Opti
     (x, y)
 }
 
-fn translate_position(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics, out: &mut Translated) {
+fn translate_position(decls: &[Decl], diag: &mut Diagnostics, out: &mut Translated) {
     // With both `left` and `right` (or `top` and `bottom`), the element is placed by `left` (`top`)
     // and, without an explicit size, stretched between them by translate_size — like CSS.
     let Edges { top, right, bottom, left, span: last_span } = edges(decls);
@@ -2792,7 +2781,7 @@ fn translate_position(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnosti
     let mut have_pos = false;
 
     if let Some(v) = &left {
-        match length_value(v, opts) {
+        match length_value(v) {
             Ok((s, o)) => {
                 xs = s;
                 xo = o;
@@ -2801,7 +2790,7 @@ fn translate_position(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnosti
             Err(e) => diag.warn(format!("`left`: {e} (ignored)"), last_span.as_ref()),
         }
     } else if let Some(v) = &right {
-        match length_value(v, opts) {
+        match length_value(v) {
             Ok((s, o)) => {
                 xs = 1.0 - s;
                 xo = -o;
@@ -2812,7 +2801,7 @@ fn translate_position(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnosti
         }
     }
     if let Some(v) = &top {
-        match length_value(v, opts) {
+        match length_value(v) {
             Ok((s, o)) => {
                 ys = s;
                 yo = o;
@@ -2821,7 +2810,7 @@ fn translate_position(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnosti
             Err(e) => diag.warn(format!("`top`: {e} (ignored)"), last_span.as_ref()),
         }
     } else if let Some(v) = &bottom {
-        match length_value(v, opts) {
+        match length_value(v) {
             Ok((s, o)) => {
                 ys = 1.0 - s;
                 yo = -o;
@@ -2835,22 +2824,16 @@ fn translate_position(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnosti
     // Margins. GuiObjects are always placed absolutely, so a margin moves the element away from the
     // edge it's placed by, and `auto` margins share out the space between two placed edges (or the
     // parent's own edges, when neither is set) as CSS does. They never move siblings.
-    let [mt, mr, mb, ml] = margins(decls, opts, diag);
+    let [mt, mr, mb, ml] = margins(decls, diag);
     if [mt, mr, mb, ml].iter().any(Option::is_some) {
-        let horizontal = place_with_margins(
-            (left.as_ref(), right.as_ref()),
-            (ml, mr),
-            true,
-            (&mut xs, &mut xo, &mut anchor_x),
-            opts,
-        );
+        let horizontal =
+            place_with_margins((left.as_ref(), right.as_ref()), (ml, mr), true, (&mut xs, &mut xo, &mut anchor_x));
         // Vertical `auto` margins are 0 in normal flow; they only centre between `top` and `bottom`.
         let vertical = place_with_margins(
             (top.as_ref(), bottom.as_ref()),
             (mt, mb),
             top.is_some() && bottom.is_some(),
             (&mut ys, &mut yo, &mut anchor_y),
-            opts,
         );
         have_pos |= horizontal || vertical;
         let placed = left.is_some() || right.is_some() || top.is_some() || bottom.is_some();
@@ -2880,52 +2863,20 @@ fn translate_position(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnosti
             match name.as_str() {
                 "translate" => {
                     if let Some(px) = args.first() {
-                        apply_translate_component(
-                            px,
-                            &mut xo,
-                            &mut anchor_x,
-                            &mut have_pos,
-                            &opts.luau,
-                            diag,
-                            d.span.as_ref(),
-                        );
+                        apply_translate_component(px, &mut xo, &mut anchor_x, &mut have_pos, diag, d.span.as_ref());
                     }
                     if let Some(py) = args.get(1) {
-                        apply_translate_component(
-                            py,
-                            &mut yo,
-                            &mut anchor_y,
-                            &mut have_pos,
-                            &opts.luau,
-                            diag,
-                            d.span.as_ref(),
-                        );
+                        apply_translate_component(py, &mut yo, &mut anchor_y, &mut have_pos, diag, d.span.as_ref());
                     }
                 }
                 "translateX" => {
                     if let Some(px) = args.first() {
-                        apply_translate_component(
-                            px,
-                            &mut xo,
-                            &mut anchor_x,
-                            &mut have_pos,
-                            &opts.luau,
-                            diag,
-                            d.span.as_ref(),
-                        );
+                        apply_translate_component(px, &mut xo, &mut anchor_x, &mut have_pos, diag, d.span.as_ref());
                     }
                 }
                 "translateY" => {
                     if let Some(py) = args.first() {
-                        apply_translate_component(
-                            py,
-                            &mut yo,
-                            &mut anchor_y,
-                            &mut have_pos,
-                            &opts.luau,
-                            diag,
-                            d.span.as_ref(),
-                        );
+                        apply_translate_component(py, &mut yo, &mut anchor_y, &mut have_pos, diag, d.span.as_ref());
                     }
                 }
                 "rotate" => {
@@ -2952,7 +2903,7 @@ fn translate_position(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnosti
     }
 
     if have_pos {
-        out.set_prop("Position", luau::udim2(xs, xo, ys, yo));
+        out.set_prop("Position", luau::Value::udim2(xs, xo, ys, yo));
     }
     // A percentage translate states the anchor explicitly, even when it's 0% (e.g. a top-left utility).
     let percent_translate = last(decls, "transform").is_some_and(|d| {
@@ -2964,10 +2915,10 @@ fn translate_position(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnosti
         })
     });
     if anchor_x != 0.0 || anchor_y != 0.0 || percent_translate {
-        out.set_prop("AnchorPoint", luau::vector2(anchor_x, anchor_y));
+        out.set_prop("AnchorPoint", luau::Value::Vector2(anchor_x, anchor_y));
     }
     if let Some(r) = rotation {
-        out.set_prop("Rotation", luau::number(r));
+        out.set_prop("Rotation", luau::Value::Number(r));
     }
     if let Some((s, sy)) = scale_out {
         if let Some(sy) = sy
@@ -2975,13 +2926,13 @@ fn translate_position(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnosti
         {
             diag.warn("non-uniform `scale()` is approximated using the X value", None);
         }
-        out.set_pseudo_prop("UIScale", "Scale", luau::number(s));
+        out.set_pseudo_prop("UIScale", "Scale", luau::Value::Number(s));
     }
 
     if let Some(d) = last(decls, "z-index") {
         match &d.value {
             Value::Str { text, .. } if text.eq_ignore_ascii_case("auto") => {}
-            Value::Number(n) => out.set_prop("ZIndex", luau::number(n.value.round())),
+            Value::Number(n) => out.set_prop("ZIndex", luau::Value::Number(n.value.round())),
             _ => diag.warn("`z-index`: unsupported value (ignored)", d.span.as_ref()),
         }
     }
@@ -2995,9 +2946,8 @@ fn place_with_margins(
     (m_start, m_end): (Option<Margin>, Option<Margin>),
     auto_spreads: bool,
     (scale, offset, anchor): (&mut f64, &mut f64, &mut f64),
-    opts: &ApproxOptions,
 ) -> bool {
-    let edge = |v: Option<&Value>| v.and_then(|v| length_value(v, opts).ok());
+    let edge = |v: Option<&Value>| v.and_then(|v| length_value(v).ok());
     // `auto` margins only share out space when the element isn't pinned to just one edge.
     let free = auto_spreads && (start.is_some() == end.is_some());
     let (s_start, o_start) = edge(start).unwrap_or((0.0, 0.0));
@@ -3037,13 +2987,12 @@ fn apply_translate_component(
     offset: &mut f64,
     anchor: &mut f64,
     have_pos: &mut bool,
-    opts: &LuauOptions,
     diag: &mut Diagnostics,
     span: Option<&Span>,
 ) {
     match v {
         Value::Number(n) if n.has_unit("%") => *anchor += -n.value / 100.0,
-        Value::Number(n) => match length_px(n, opts) {
+        Value::Number(n) => match length_px(n) {
             Some(px) => {
                 *offset += px;
                 *have_pos = true;
@@ -3088,7 +3037,7 @@ fn parse_border_shorthand(v: &Value) -> (Option<Value>, Option<Value>, Option<Va
 /// How far a CSS border pushes the content in, in px. CSS draws a border inside the element's
 /// box (with `box-sizing: border-box`), taking room from the content; a UIStroke in Border mode
 /// is drawn outside the box and takes none. An outline takes no room in either.
-fn border_inset(decls: &[Decl], opts: &ApproxOptions) -> f64 {
+fn border_inset(decls: &[Decl]) -> f64 {
     let mut width: Option<Value> = None;
     let mut style: Option<Value> = None;
     let mut present = false;
@@ -3120,7 +3069,7 @@ fn border_inset(decls: &[Decl], opts: &ApproxOptions) -> f64 {
         return 0.0;
     }
     // A UIStroke is 1px when the border gives no width (see translate_box).
-    width.as_ref().map_or(Some(1.0), |w| px_only(w, &opts.luau).ok()).unwrap_or(0.0)
+    width.as_ref().map_or(Some(1.0), |w| px_only(w).ok()).unwrap_or(0.0)
 }
 
 fn translate_box(
@@ -3139,8 +3088,8 @@ fn translate_box(
                 d.span.as_ref(),
             );
         }
-        match length_value(&items[0], opts) {
-            Ok((s, o)) => out.set_pseudo_prop("UICorner", "CornerRadius", luau::udim(s, o)),
+        match length_value(&items[0]) {
+            Ok((s, o)) => out.set_pseudo_prop("UICorner", "CornerRadius", luau::Value::udim(s, o)),
             Err(e) => diag.warn(format!("`border-radius`: {e} (ignored)"), d.span.as_ref()),
         }
     }
@@ -3178,8 +3127,8 @@ fn translate_box(
     const PADDING_NAMES: [&str; 4] = ["PaddingTop", "PaddingRight", "PaddingBottom", "PaddingLeft"];
     // The half-leading CSS puts above and below the text (see half_leading) goes on top of the padding,
     // and so does the border, which CSS draws inside the box and Roblox's UIStroke outside it.
-    let leading = if opts.groups.contains(&Group::Text) { half_leading(decls, opts) } else { None };
-    let inset = border_inset(decls, opts);
+    let leading = if opts.groups.contains(&Group::Text) { half_leading(decls) } else { None };
+    let inset = border_inset(decls);
     for (i, side) in sides.into_iter().enumerate() {
         let extra = inset
             + match (i, leading) {
@@ -3188,11 +3137,11 @@ fn translate_box(
                 _ => 0.0,
             };
         match side {
-            Some((v, span)) => match length_value(&v, opts) {
-                Ok((s, o)) => out.set_pseudo_prop("UIPadding", PADDING_NAMES[i], luau::udim(s, o + extra)),
+            Some((v, span)) => match length_value(&v) {
+                Ok((s, o)) => out.set_pseudo_prop("UIPadding", PADDING_NAMES[i], luau::Value::udim(s, o + extra)),
                 Err(e) => diag.warn(format!("`padding`: {e} (ignored)"), span.as_ref()),
             },
-            None if extra != 0.0 => out.set_pseudo_prop("UIPadding", PADDING_NAMES[i], luau::udim(0.0, extra)),
+            None if extra != 0.0 => out.set_pseudo_prop("UIPadding", PADDING_NAMES[i], luau::Value::udim(0.0, extra)),
             None => {}
         }
     }
@@ -3284,24 +3233,24 @@ fn translate_box(
             .unwrap_or(false);
         let width_is_zero = st.width.as_ref().and_then(|v| v.as_number()).map(|n| n.value == 0.0).unwrap_or(false);
         // CSS borders replace Roblox's legacy border entirely.
-        out.set_prop("BorderSizePixel", "0".to_string());
+        out.set_prop("BorderSizePixel", luau::Value::Number(0.0));
         if style_is_none || width_is_zero {
-            out.set_pseudo_prop("UIStroke", "Enabled", "false".to_string());
+            out.set_pseudo_prop("UIStroke", "Enabled", luau::Value::Bool(false));
         } else {
             // Explicit, so a lower-priority `border: none` can't switch this stroke off.
-            out.set_pseudo_prop("UIStroke", "Enabled", "true".to_string());
-            out.set_pseudo_prop("UIStroke", "ApplyStrokeMode", "Enum.ApplyStrokeMode.Border".to_string());
+            out.set_pseudo_prop("UIStroke", "Enabled", luau::Value::Bool(true));
+            out.set_pseudo_prop("UIStroke", "ApplyStrokeMode", luau::Value::enum_item("ApplyStrokeMode", "Border"));
             if let Some(w) = &st.width {
-                match px_only(w, &opts.luau) {
-                    Ok(px) => out.set_pseudo_prop("UIStroke", "Thickness", luau::number(px)),
+                match px_only(w) {
+                    Ok(px) => out.set_pseudo_prop("UIStroke", "Thickness", luau::Value::Number(px)),
                     Err(e) => diag.warn(format!("`border`: {e} (ignored)"), st.span.as_ref()),
                 }
             } else {
-                out.set_pseudo_prop("UIStroke", "Thickness", luau::number(1.0));
+                out.set_pseudo_prop("UIStroke", "Thickness", luau::Value::Number(1.0));
             }
             let mut base_alpha = 1.0;
             if let Some(c) = &st.color {
-                match resolve_color(c, &opts.luau) {
+                match resolve_color(c) {
                     Ok((expr, alpha)) => {
                         out.set_pseudo_prop("UIStroke", "Color", expr);
                         if let Some(a) = alpha {
@@ -3314,7 +3263,7 @@ fn translate_box(
             out.set_pseudo_prop(
                 "UIStroke",
                 "Transparency",
-                luau::number(compute_transparency(base_alpha, opacity_factor)),
+                luau::Value::Number(compute_transparency(base_alpha, opacity_factor)),
             );
             if let Some(s) = &st.style
                 && let Some(name) = s.as_str()
@@ -3342,7 +3291,7 @@ fn apply_justify(s: &str, column: bool, grid: bool, out: &mut Translated, diag: 
         _ => None,
     } {
         let prop = if column { "VerticalFlex" } else { "HorizontalFlex" };
-        out.set_pseudo_prop(class, prop, format!("Enum.UIFlexAlignment.{flex_enum}"));
+        out.set_pseudo_prop(class, prop, luau::Value::enum_item("UIFlexAlignment", flex_enum));
         return;
     }
     let side = match lower.as_str() {
@@ -3356,21 +3305,25 @@ fn apply_justify(s: &str, column: bool, grid: bool, out: &mut Translated, diag: 
     };
     if column {
         let v = ["Top", "Center", "Bottom"][side];
-        out.set_pseudo_prop(class, "VerticalAlignment", format!("Enum.VerticalAlignment.{v}"));
+        out.set_pseudo_prop(class, "VerticalAlignment", luau::Value::enum_item("VerticalAlignment", v));
     } else {
         let v = ["Left", "Center", "Right"][side];
-        out.set_pseudo_prop(class, "HorizontalAlignment", format!("Enum.HorizontalAlignment.{v}"));
+        out.set_pseudo_prop(class, "HorizontalAlignment", luau::Value::enum_item("HorizontalAlignment", v));
     }
 }
 
 fn apply_align_items(s: &str, column: bool, out: &mut Translated, diag: &mut Diagnostics, span: Option<&Span>) {
     let lower = s.to_ascii_lowercase();
     if lower == "stretch" || lower == "normal" {
-        out.set_pseudo_prop("UIListLayout", "ItemLineAlignment", "Enum.ItemLineAlignment.Stretch".to_string());
+        out.set_pseudo_prop(
+            "UIListLayout",
+            "ItemLineAlignment",
+            luau::Value::enum_item("ItemLineAlignment", "Stretch"),
+        );
         return;
     }
     // Any other value undoes the stretch a `display: flex` rule gives by default.
-    out.set_pseudo_prop("UIListLayout", "ItemLineAlignment", "Enum.ItemLineAlignment.Automatic".to_string());
+    out.set_pseudo_prop("UIListLayout", "ItemLineAlignment", luau::Value::enum_item("ItemLineAlignment", "Automatic"));
     // Roblox has no baseline alignment. Bottom edges line up with the baselines whenever the items
     // share a font size, which is the usual case; taller text then sits a descender too low. In a
     // column the cross axis is horizontal, where CSS itself falls back to `start`.
@@ -3378,7 +3331,7 @@ fn apply_align_items(s: &str, column: bool, out: &mut Translated, diag: &mut Dia
         let side = if column { "Left" } else { "Bottom" };
         diag.warn(format!("`align-items: {lower}` is approximated as `{side}`"), span);
         let prop = if column { "HorizontalAlignment" } else { "VerticalAlignment" };
-        out.set_pseudo_prop("UIListLayout", prop, format!("Enum.{prop}.{side}"));
+        out.set_pseudo_prop("UIListLayout", prop, luau::Value::enum_item(prop, side));
         return;
     }
     let side = match lower.as_str() {
@@ -3392,10 +3345,10 @@ fn apply_align_items(s: &str, column: bool, out: &mut Translated, diag: &mut Dia
     };
     if column {
         let v = ["Left", "Center", "Right"][side];
-        out.set_pseudo_prop("UIListLayout", "HorizontalAlignment", format!("Enum.HorizontalAlignment.{v}"));
+        out.set_pseudo_prop("UIListLayout", "HorizontalAlignment", luau::Value::enum_item("HorizontalAlignment", v));
     } else {
         let v = ["Top", "Center", "Bottom"][side];
-        out.set_pseudo_prop("UIListLayout", "VerticalAlignment", format!("Enum.VerticalAlignment.{v}"));
+        out.set_pseudo_prop("UIListLayout", "VerticalAlignment", luau::Value::enum_item("VerticalAlignment", v));
     }
 }
 
@@ -3411,7 +3364,7 @@ enum Track {
     Auto,
 }
 
-fn track_size(v: &Value, opts: &ApproxOptions) -> Result<Track, String> {
+fn track_size(v: &Value) -> Result<Track, String> {
     if let Some(s) = v.as_str() {
         return match s.to_ascii_lowercase().as_str() {
             "auto" | "min-content" | "max-content" => Ok(Track::Auto),
@@ -3426,12 +3379,12 @@ fn track_size(v: &Value, opts: &ApproxOptions) -> Result<Track, String> {
     if let Value::Call { name, .. } = v {
         return Err(format!("`{name}()` track sizes have no Roblox equivalent"));
     }
-    length_value(v, opts).map(|(s, o)| Track::Fixed(s, o))
+    length_value(v).map(|(s, o)| Track::Fixed(s, o))
 }
 
 /// Flattens a track list (`repeat(3, 68px)`, `68px 68px 68px`, …) into a cell count and the one
 /// size all of its tracks share.
-fn grid_tracks(v: &Value, opts: &ApproxOptions) -> Result<(usize, Track), String> {
+fn grid_tracks(v: &Value) -> Result<(usize, Track), String> {
     let mut tracks: Vec<Track> = Vec::new();
     for item in space_items(v) {
         match &item {
@@ -3448,10 +3401,10 @@ fn grid_tracks(v: &Value, opts: &ApproxOptions) -> Result<(usize, Track), String
                 if n < 1.0 || n.fract() != 0.0 {
                     return Err(format!("`repeat()` needs a whole cell count, got `{}`", count.inspect()));
                 }
-                let size = track_size(track, opts)?;
+                let size = track_size(track)?;
                 tracks.extend(std::iter::repeat_n(size, n as usize));
             }
-            other => tracks.push(track_size(other, opts)?),
+            other => tracks.push(track_size(other)?),
         }
     }
     let first = *tracks.first().ok_or("expected a track list")?;
@@ -3485,7 +3438,7 @@ fn translate_grid(
     let (column_gap, row_gap) = gaps;
     let mut axis = |names: [&str; 2]| -> Option<(usize, Track, Option<&Span>)> {
         let d = names.iter().find_map(|n| last(decls, n))?;
-        match grid_tracks(&d.value, opts) {
+        match grid_tracks(&d.value) {
             Ok((count, track)) => Some((count, track, d.span.as_ref())),
             Err(e) => {
                 diag.warn(format!("`{}`: {e} (ignored)", d.name), d.span.as_ref());
@@ -3500,7 +3453,7 @@ fn translate_grid(
     // The cells per line are counted along the fill direction: columns for a row flow, rows for a
     // column flow.
     if let Some((count, _, _)) = if column_flow { rows } else { columns } {
-        out.set_pseudo_prop("UIGridLayout", "FillDirectionMaxCells", count.to_string());
+        out.set_pseudo_prop("UIGridLayout", "FillDirectionMaxCells", luau::Value::Number(count as f64));
     }
     if columns.is_none() && rows.is_none() {
         return;
@@ -3521,7 +3474,7 @@ fn translate_grid(
     }
     let x = columns.map_or((0.0, 100.0), |(count, track, _)| cell_extent(track, count, column_gap));
     let y = rows.map_or((0.0, 100.0), |(count, track, _)| cell_extent(track, count, row_gap));
-    out.set_pseudo_prop("UIGridLayout", "CellSize", luau::udim2(x.0, x.1, y.0, y.1));
+    out.set_pseudo_prop("UIGridLayout", "CellSize", luau::Value::udim2(x.0, x.1, y.0, y.1));
 }
 
 /// Whether the rule makes its element a flex container.
@@ -3574,17 +3527,21 @@ fn translate_layout(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics
     {
         match s.to_ascii_lowercase().as_str() {
             "flex" | "inline-flex" => {
-                out.set_pseudo_prop("UIListLayout", "FillDirection", "Enum.FillDirection.Horizontal".to_string());
-                out.set_pseudo_prop("UIListLayout", "SortOrder", "Enum.SortOrder.LayoutOrder".to_string());
-                out.set_prop("Visible", "true".to_string());
+                out.set_pseudo_prop(
+                    "UIListLayout",
+                    "FillDirection",
+                    luau::Value::enum_item("FillDirection", "Horizontal"),
+                );
+                out.set_pseudo_prop("UIListLayout", "SortOrder", luau::Value::enum_item("SortOrder", "LayoutOrder"));
+                out.set_prop("Visible", luau::Value::Bool(true));
             }
             "grid" | "inline-grid" => {
                 is_grid = true;
-                out.set_pseudo_prop("UIGridLayout", "SortOrder", "Enum.SortOrder.LayoutOrder".to_string());
-                out.set_prop("Visible", "true".to_string());
+                out.set_pseudo_prop("UIGridLayout", "SortOrder", luau::Value::enum_item("SortOrder", "LayoutOrder"));
+                out.set_prop("Visible", luau::Value::Bool(true));
             }
-            "none" => out.set_prop("Visible", "false".to_string()),
-            _ => out.set_prop("Visible", "true".to_string()),
+            "none" => out.set_prop("Visible", luau::Value::Bool(false)),
+            _ => out.set_prop("Visible", luau::Value::Bool(true)),
         }
     }
 
@@ -3610,7 +3567,7 @@ fn translate_layout(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics
             }
         };
         direction_column = dir == "Vertical";
-        out.set_pseudo_prop("UIListLayout", "FillDirection", format!("Enum.FillDirection.{dir}"));
+        out.set_pseudo_prop("UIListLayout", "FillDirection", luau::Value::enum_item("FillDirection", dir));
     }
 
     let mut grid_column_flow = false;
@@ -3624,7 +3581,7 @@ fn translate_layout(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics
             }
         }
         let dir = if grid_column_flow { "Vertical" } else { "Horizontal" };
-        out.set_pseudo_prop("UIGridLayout", "FillDirection", format!("Enum.FillDirection.{dir}"));
+        out.set_pseudo_prop("UIGridLayout", "FillDirection", luau::Value::enum_item("FillDirection", dir));
     }
     let column_flow = if is_grid { grid_column_flow } else { direction_column };
 
@@ -3641,9 +3598,11 @@ fn translate_layout(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics
         }
         // CSS flex items stretch across the line unless told otherwise. translate_size keeps
         // explicitly sized items out of it, as CSS does.
-        None if is_flex(decls) => {
-            out.set_pseudo_prop("UIListLayout", "ItemLineAlignment", "Enum.ItemLineAlignment.Stretch".to_string())
-        }
+        None if is_flex(decls) => out.set_pseudo_prop(
+            "UIListLayout",
+            "ItemLineAlignment",
+            luau::Value::enum_item("ItemLineAlignment", "Stretch"),
+        ),
         None => {}
     }
 
@@ -3668,21 +3627,21 @@ fn translate_layout(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics
     let gap_span = ["gap", "row-gap", "column-gap"].iter().find_map(|n| last(decls, n)).and_then(|d| d.span.as_ref());
     let list_gap = if direction_column { &rg } else { &cg };
     if let (Some(v), false) = (list_gap, is_grid) {
-        match length_value(v, opts) {
-            Ok((s, o)) => out.set_pseudo_prop("UIListLayout", "Padding", luau::udim(s, o)),
+        match length_value(v) {
+            Ok((s, o)) => out.set_pseudo_prop("UIListLayout", "Padding", luau::Value::udim(s, o)),
             Err(e) => diag.warn(format!("`gap`: {e} (ignored)"), gap_span),
         }
     }
     let cell_padding = |v: &Option<Value>| match v {
-        Some(v) => length_value(v, opts).unwrap_or((0.0, 0.0)),
+        Some(v) => length_value(v).unwrap_or((0.0, 0.0)),
         None => (0.0, 0.0),
     };
     let (column_gap, row_gap) = (cell_padding(&cg), cell_padding(&rg));
     if is_grid
         && let (Some(c), Some(r)) = (&cg, &rg)
-        && let (Ok((cs, co)), Ok((rs, ro))) = (length_value(c, opts), length_value(r, opts))
+        && let (Ok((cs, co)), Ok((rs, ro))) = (length_value(c), length_value(r))
     {
-        out.set_pseudo_prop("UIGridLayout", "CellPadding", luau::udim2(cs, co, rs, ro));
+        out.set_pseudo_prop("UIGridLayout", "CellPadding", luau::Value::udim2(cs, co, rs, ro));
     }
     translate_grid(decls, opts, grid_column_flow, (column_gap, row_gap), diag, out);
 
@@ -3690,11 +3649,11 @@ fn translate_layout(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics
         && let Some(s) = d.value.as_str()
     {
         match s.to_ascii_lowercase().as_str() {
-            "wrap" => out.set_pseudo_prop("UIListLayout", "Wraps", "true".to_string()),
-            "nowrap" => out.set_pseudo_prop("UIListLayout", "Wraps", "false".to_string()),
+            "wrap" => out.set_pseudo_prop("UIListLayout", "Wraps", luau::Value::Bool(true)),
+            "nowrap" => out.set_pseudo_prop("UIListLayout", "Wraps", luau::Value::Bool(false)),
             "wrap-reverse" => {
                 diag.warn("`flex-wrap: wrap-reverse` approximated as `wrap`", d.span.as_ref());
-                out.set_pseudo_prop("UIListLayout", "Wraps", "true".to_string());
+                out.set_pseudo_prop("UIListLayout", "Wraps", luau::Value::Bool(true));
             }
             other => diag.warn(format!("unknown `flex-wrap: {other}` (ignored)"), d.span.as_ref()),
         }
@@ -3739,13 +3698,13 @@ fn translate_layout(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics
         }
     }
     if let Some(mode) = flex_mode {
-        out.set_pseudo_prop("UIFlexItem", "FlexMode", format!("Enum.UIFlexMode.{mode}"));
+        out.set_pseudo_prop("UIFlexItem", "FlexMode", luau::Value::enum_item("UIFlexMode", mode));
         if mode == "Custom" {
             if let Some(g) = grow {
-                out.set_pseudo_prop("UIFlexItem", "GrowRatio", luau::number(g));
+                out.set_pseudo_prop("UIFlexItem", "GrowRatio", luau::Value::Number(g));
             }
             if let Some(s) = shrink {
-                out.set_pseudo_prop("UIFlexItem", "ShrinkRatio", luau::number(s));
+                out.set_pseudo_prop("UIFlexItem", "ShrinkRatio", luau::Value::Number(s));
             }
         }
     }
@@ -3765,14 +3724,14 @@ fn translate_layout(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics
             }
         };
         if let Some(e) = e {
-            out.set_pseudo_prop("UIFlexItem", "ItemLineAlignment", format!("Enum.ItemLineAlignment.{e}"));
+            out.set_pseudo_prop("UIFlexItem", "ItemLineAlignment", luau::Value::enum_item("ItemLineAlignment", e));
         }
     }
 
     if let Some(d) = last(decls, "order")
         && let Some(n) = d.value.as_number()
     {
-        out.set_prop("LayoutOrder", luau::number(n.value.round()));
+        out.set_prop("LayoutOrder", luau::Value::Number(n.value.round()));
     }
 }
 
@@ -3811,17 +3770,17 @@ fn translate_overflow(decls: &[Decl], diag: &mut Diagnostics, out: &mut Translat
         return;
     }
     let clips = [x, y].iter().any(|a| matches!(a, Some(Overflow::Clip | Overflow::Scroll)));
-    out.set_prop("ClipsDescendants", clips.to_string());
+    out.set_prop("ClipsDescendants", luau::Value::Bool(clips));
     let axes = match (x == Some(Overflow::Scroll), y == Some(Overflow::Scroll)) {
         (true, true) => "XY",
         (true, false) => "X",
         (false, true) => "Y",
         (false, false) => return,
     };
-    out.set_prop("ScrollingEnabled", "true".to_string());
-    out.set_prop("ScrollingDirection", format!("Enum.ScrollingDirection.{axes}"));
-    out.set_prop("AutomaticCanvasSize", format!("Enum.AutomaticSize.{axes}"));
-    out.set_prop("CanvasSize", "UDim2.new()".to_string());
+    out.set_prop("ScrollingEnabled", luau::Value::Bool(true));
+    out.set_prop("ScrollingDirection", luau::Value::enum_item("ScrollingDirection", axes));
+    out.set_prop("AutomaticCanvasSize", luau::Value::enum_item("AutomaticSize", axes));
+    out.set_prop("CanvasSize", luau::Value::udim2(0.0, 0.0, 0.0, 0.0));
 }
 
 /// Whether the element scrolls along each axis: `(x, y)`.
@@ -3875,10 +3834,10 @@ fn translate_scrollbar(
                 Some("none") => Ok(0.0),
                 Some(other) => Err(format!("unknown value `{other}`")),
                 // Not CSS, but the obvious meaning of a length.
-                None => px_only(&d.value, &opts.luau),
+                None => px_only(&d.value),
             };
             match px {
-                Ok(px) => out.set_prop("ScrollBarThickness", luau::number(px)),
+                Ok(px) => out.set_prop("ScrollBarThickness", luau::Value::Number(px)),
                 Err(e) => diag.warn(format!("`scrollbar-width`: {e} (ignored)"), d.span.as_ref()),
             }
         }
@@ -3886,10 +3845,14 @@ fn translate_scrollbar(
             let text = d.value.to_css().unwrap_or_default().to_ascii_lowercase();
             let words: Vec<&str> = text.split_whitespace().collect();
             match words.as_slice() {
-                ["auto"] => out.set_prop("VerticalScrollBarInset", "Enum.ScrollBarInset.ScrollBar".to_string()),
-                ["stable"] => out.set_prop("VerticalScrollBarInset", "Enum.ScrollBarInset.Always".to_string()),
+                ["auto"] => {
+                    out.set_prop("VerticalScrollBarInset", luau::Value::enum_item("ScrollBarInset", "ScrollBar"))
+                }
+                ["stable"] => {
+                    out.set_prop("VerticalScrollBarInset", luau::Value::enum_item("ScrollBarInset", "Always"))
+                }
                 ["stable", "both-edges"] | ["both-edges", "stable"] => {
-                    out.set_prop("VerticalScrollBarInset", "Enum.ScrollBarInset.Always".to_string());
+                    out.set_prop("VerticalScrollBarInset", luau::Value::enum_item("ScrollBarInset", "Always"));
                     diag.warn(
                         "`scrollbar-gutter: stable both-edges`: Roblox only reserves the scrollbar's own edge",
                         d.span.as_ref(),
@@ -3911,9 +3874,9 @@ fn translate_scrollbar(
         };
         let (color, alpha) = match thumb {
             // `auto`: back to Roblox's own white thumb.
-            None => (Ok((white(opts), Some(1.0))), 1.0),
+            None => (Ok((white(), Some(1.0))), 1.0),
             Some(v) => {
-                let r = resolve_color(v, &opts.luau);
+                let r = resolve_color(v);
                 let a = r.as_ref().ok().and_then(|(_, a)| *a).unwrap_or(1.0);
                 (r, a)
             }
@@ -3923,7 +3886,10 @@ fn translate_scrollbar(
                 if opts.groups.contains(&Group::Color) {
                     out.set_prop("ScrollBarImageColor3", expr);
                 }
-                out.set_prop("ScrollBarImageTransparency", luau::number(compute_transparency(alpha, opacity_factor)));
+                out.set_prop(
+                    "ScrollBarImageTransparency",
+                    luau::Value::Number(compute_transparency(alpha, opacity_factor)),
+                );
             }
             Err(e) => diag.warn(format!("`scrollbar-color`: {e} (ignored)"), d.span.as_ref()),
         }
@@ -3935,8 +3901,8 @@ fn translate_visibility(decls: &[Decl], diag: &mut Diagnostics, out: &mut Transl
         && let Some(s) = d.value.as_str()
     {
         match s.to_ascii_lowercase().as_str() {
-            "hidden" | "collapse" => out.set_prop("Visible", "false".to_string()),
-            "visible" => out.set_prop("Visible", "true".to_string()),
+            "hidden" | "collapse" => out.set_prop("Visible", luau::Value::Bool(false)),
+            "visible" => out.set_prop("Visible", luau::Value::Bool(true)),
             other => diag.warn(format!("unknown `visibility: {other}` (ignored)"), d.span.as_ref()),
         }
     }
@@ -3945,8 +3911,8 @@ fn translate_visibility(decls: &[Decl], diag: &mut Diagnostics, out: &mut Transl
         && let Some(s) = d.value.as_str()
     {
         match s.to_ascii_lowercase().as_str() {
-            "none" => out.set_prop("Interactable", "false".to_string()),
-            "auto" => out.set_prop("Interactable", "true".to_string()),
+            "none" => out.set_prop("Interactable", luau::Value::Bool(false)),
+            "auto" => out.set_prop("Interactable", luau::Value::Bool(true)),
             other => diag.warn(format!("unknown `pointer-events: {other}` (ignored)"), d.span.as_ref()),
         }
     }
@@ -3956,8 +3922,8 @@ fn translate_visibility(decls: &[Decl], diag: &mut Diagnostics, out: &mut Transl
         && let Some(s) = d.value.as_str()
     {
         match s.to_ascii_lowercase().as_str() {
-            "none" => out.set_prop("AutoButtonColor", "false".to_string()),
-            "auto" | "button" => out.set_prop("AutoButtonColor", "true".to_string()),
+            "none" => out.set_prop("AutoButtonColor", luau::Value::Bool(false)),
+            "auto" | "button" => out.set_prop("AutoButtonColor", luau::Value::Bool(true)),
             other => diag.warn(format!("unknown `appearance: {other}` (ignored)"), d.span.as_ref()),
         }
     }
@@ -4098,8 +4064,7 @@ fn easing_style(l: &str) -> Option<&'static str> {
 }
 
 fn easing_direction(l: &str) -> Option<&'static str> {
-    // lass spelled directions EaseIn / EaseOut / EaseInOut.
-    match l.strip_prefix("ease").unwrap_or(l) {
+    match l {
         "in" => Some("In"),
         "out" => Some("Out"),
         "inout" => Some("InOut"),
@@ -4138,14 +4103,8 @@ fn seconds_of(n: &Number, diag: &mut Diagnostics) -> f64 {
     }
 }
 
-fn build_tween_info(dur: f64, style: &str, direction: &str, delay: f64) -> String {
-    let mut expr =
-        format!("TweenInfo.new({}, Enum.EasingStyle.{style}, Enum.EasingDirection.{direction}", luau::number(dur));
-    if delay > 0.0 {
-        expr.push_str(&format!(", 0, false, {}", luau::number(delay)));
-    }
-    expr.push(')');
-    expr
+fn build_tween_info(dur: f64, style: &str, direction: &str, delay: f64) -> luau::TweenInfo {
+    luau::TweenInfo::new(dur, style, direction, delay.max(0.0))
 }
 
 fn emit_transition_entry(prop: &str, dur: f64, timing: &str, delay: f64, diag: &mut Diagnostics, out: &mut Translated) {
@@ -4278,9 +4237,9 @@ fn translate_transition_group(decls: &[Decl], diag: &mut Diagnostics, out: &mut 
     }
 }
 
-/// lass-compatible `Transition: BackgroundColor3 0.2s Quad EaseOut, BackgroundTransparency`
+/// `Transition: BackgroundColor3 0.2s Quad Out, BackgroundTransparency`
 /// (Roblox property names, used WITHOUT `--approx`).
-pub fn roblox_transitions(value: &Value) -> Result<Vec<(String, String)>, String> {
+pub fn roblox_transitions(value: &Value) -> Result<Vec<(String, luau::TweenInfo)>, String> {
     let entries: Vec<Value> = match value {
         Value::List { items, sep: ListSep::Comma, .. } => items.clone(),
         other => vec![other.clone()],
@@ -4338,12 +4297,7 @@ mod tests {
     use super::*;
 
     fn opts_for(groups: &[Group]) -> ApproxOptions {
-        ApproxOptions {
-            groups: Group::expand(groups),
-            luau: LuauOptions::default(),
-            default_font: "rbxasset://fonts/families/SourceSansPro.json".to_string(),
-            strict: false,
-        }
+        ApproxOptions { groups: Group::expand(groups), strict: false }
     }
 
     fn all_opts() -> ApproxOptions {
@@ -4354,16 +4308,16 @@ mod tests {
         Decl { name: name.to_string(), value, span: None }
     }
 
-    fn prop<'a>(t: &'a Translated, name: &str) -> Option<&'a str> {
-        t.props.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
+    fn prop(t: &Translated, name: &str) -> Option<String> {
+        t.props.iter().find(|(n, _)| n == name).map(|(_, v)| luau::render(v))
     }
 
-    fn pseudo<'a>(t: &'a Translated, class: &str, name: &str) -> Option<&'a str> {
+    fn pseudo(t: &Translated, class: &str, name: &str) -> Option<String> {
         t.pseudo
             .iter()
             .find(|(n, _)| n == class)
             .and_then(|(_, props)| props.iter().find(|(n, _)| n == name))
-            .map(|(_, v)| v.as_str())
+            .map(|(_, v)| luau::render(v))
     }
 
     #[test]
@@ -4392,9 +4346,9 @@ mod tests {
         let mut diag = Diagnostics::default();
         let decls = vec![decl("opacity", Value::num(0.25))];
         let t = translate(&decls, &all_opts(), &mut diag);
-        assert_eq!(prop(&t, "BackgroundTransparency"), None);
-        assert_eq!(prop(&t, "TextTransparency"), Some("0.75"));
-        assert_eq!(prop(&t, "ImageTransparency"), Some("0.75"));
+        assert_eq!(prop(&t, "BackgroundTransparency").as_deref(), None);
+        assert_eq!(prop(&t, "TextTransparency").as_deref(), Some("0.75"));
+        assert_eq!(prop(&t, "ImageTransparency").as_deref(), Some("0.75"));
     }
 
     #[test]
@@ -4405,8 +4359,8 @@ mod tests {
             decl("opacity", Value::num(0.5)),
         ];
         let t = translate(&decls, &all_opts(), &mut diag);
-        assert_eq!(prop(&t, "BackgroundColor3"), Some("Color3.fromRGB(255, 0, 0)"));
-        assert_eq!(prop(&t, "BackgroundTransparency"), Some("0.75"));
+        assert_eq!(prop(&t, "BackgroundColor3").as_deref(), Some("Color3.fromRGB(255, 0, 0)"));
+        assert_eq!(prop(&t, "BackgroundTransparency").as_deref(), Some("0.75"));
     }
 
     #[test]
@@ -4415,8 +4369,8 @@ mod tests {
         let calc = Value::Call { name: "calc".to_string(), args: vec![Value::str("50% + 10px")] };
         let decls = vec![decl("width", calc)];
         let t = translate(&decls, &all_opts(), &mut diag);
-        assert_eq!(prop(&t, "Size"), Some("UDim2.new(0.5, 10, 0, 0)"));
-        assert_eq!(prop(&t, "AutomaticSize"), Some("Enum.AutomaticSize.Y"));
+        assert_eq!(prop(&t, "Size").as_deref(), Some("UDim2.new(0.5, 10, 0, 0)"));
+        assert_eq!(prop(&t, "AutomaticSize").as_deref(), Some("Enum.AutomaticSize.Y"));
     }
 
     #[test]
@@ -4424,7 +4378,7 @@ mod tests {
         let mut diag = Diagnostics::default();
         let decls = vec![decl("border-radius", Value::num_unit(50.0, "%"))];
         let t = translate(&decls, &all_opts(), &mut diag);
-        assert_eq!(pseudo(&t, "UICorner", "CornerRadius"), Some("UDim.new(0.5, 0)"));
+        assert_eq!(pseudo(&t, "UICorner", "CornerRadius").as_deref(), Some("UDim.new(0.5, 0)"));
     }
 
     #[test]
@@ -4433,10 +4387,10 @@ mod tests {
         let value = Value::list(vec![Value::num_unit(4.0, "px"), Value::num_unit(8.0, "px")], ListSep::Space);
         let decls = vec![decl("padding", value)];
         let t = translate(&decls, &all_opts(), &mut diag);
-        assert_eq!(pseudo(&t, "UIPadding", "PaddingTop"), Some("UDim.new(0, 4)"));
-        assert_eq!(pseudo(&t, "UIPadding", "PaddingRight"), Some("UDim.new(0, 8)"));
-        assert_eq!(pseudo(&t, "UIPadding", "PaddingBottom"), Some("UDim.new(0, 4)"));
-        assert_eq!(pseudo(&t, "UIPadding", "PaddingLeft"), Some("UDim.new(0, 8)"));
+        assert_eq!(pseudo(&t, "UIPadding", "PaddingTop").as_deref(), Some("UDim.new(0, 4)"));
+        assert_eq!(pseudo(&t, "UIPadding", "PaddingRight").as_deref(), Some("UDim.new(0, 8)"));
+        assert_eq!(pseudo(&t, "UIPadding", "PaddingBottom").as_deref(), Some("UDim.new(0, 4)"));
+        assert_eq!(pseudo(&t, "UIPadding", "PaddingLeft").as_deref(), Some("UDim.new(0, 8)"));
     }
 
     #[test]
@@ -4448,9 +4402,9 @@ mod tests {
         );
         let decls = vec![decl("border", value)];
         let t = translate(&decls, &all_opts(), &mut diag);
-        assert_eq!(pseudo(&t, "UIStroke", "ApplyStrokeMode"), Some("Enum.ApplyStrokeMode.Border"));
-        assert_eq!(pseudo(&t, "UIStroke", "Thickness"), Some("2"));
-        assert_eq!(pseudo(&t, "UIStroke", "Color"), Some("Color3.fromRGB(0, 0, 0)"));
+        assert_eq!(pseudo(&t, "UIStroke", "ApplyStrokeMode").as_deref(), Some("Enum.ApplyStrokeMode.Border"));
+        assert_eq!(pseudo(&t, "UIStroke", "Thickness").as_deref(), Some("2"));
+        assert_eq!(pseudo(&t, "UIStroke", "Color").as_deref(), Some("Color3.fromRGB(0, 0, 0)"));
     }
 
     #[test]
@@ -4464,8 +4418,8 @@ mod tests {
         let value = Value::list(vec![translate_call, rotate_call], ListSep::Space);
         let decls = vec![decl("transform", value)];
         let t = translate(&decls, &all_opts(), &mut diag);
-        assert_eq!(prop(&t, "AnchorPoint"), Some("Vector2.new(0.5, 0.5)"));
-        assert_eq!(prop(&t, "Rotation"), Some("45"));
+        assert_eq!(prop(&t, "AnchorPoint").as_deref(), Some("Vector2.new(0.5, 0.5)"));
+        assert_eq!(prop(&t, "Rotation").as_deref(), Some("45"));
     }
 
     #[test]
@@ -4478,10 +4432,13 @@ mod tests {
             decl("align-items", Value::str("center")),
         ];
         let t = translate(&decls, &all_opts(), &mut diag);
-        assert_eq!(pseudo(&t, "UIListLayout", "FillDirection"), Some("Enum.FillDirection.Vertical"));
-        assert_eq!(pseudo(&t, "UIListLayout", "Padding"), Some("UDim.new(0, 8)"));
-        assert_eq!(pseudo(&t, "UIListLayout", "HorizontalAlignment"), Some("Enum.HorizontalAlignment.Center"));
-        assert_eq!(prop(&t, "Visible"), Some("true"));
+        assert_eq!(pseudo(&t, "UIListLayout", "FillDirection").as_deref(), Some("Enum.FillDirection.Vertical"));
+        assert_eq!(pseudo(&t, "UIListLayout", "Padding").as_deref(), Some("UDim.new(0, 8)"));
+        assert_eq!(
+            pseudo(&t, "UIListLayout", "HorizontalAlignment").as_deref(),
+            Some("Enum.HorizontalAlignment.Center")
+        );
+        assert_eq!(prop(&t, "Visible").as_deref(), Some("true"));
     }
 
     #[test]
@@ -4489,7 +4446,7 @@ mod tests {
         let mut diag = Diagnostics::default();
         let decls = vec![decl("display", Value::str("flex")), decl("align-items", Value::str("baseline"))];
         let t = translate(&decls, &all_opts(), &mut diag);
-        assert_eq!(pseudo(&t, "UIListLayout", "VerticalAlignment"), Some("Enum.VerticalAlignment.Bottom"));
+        assert_eq!(pseudo(&t, "UIListLayout", "VerticalAlignment").as_deref(), Some("Enum.VerticalAlignment.Bottom"));
         assert!(diag.items.iter().any(|m| m.message.contains("approximated as `Bottom`")), "{:?}", diag.items);
     }
 
@@ -4505,9 +4462,9 @@ mod tests {
             decl("gap", Value::num_unit(6.0, "px")),
         ];
         let t = translate(&decls, &all_opts(), &mut diag);
-        assert_eq!(pseudo(&t, "UIGridLayout", "FillDirectionMaxCells"), Some("3"));
-        assert_eq!(pseudo(&t, "UIGridLayout", "CellSize"), Some("UDim2.new(0, 68, 0, 68)"));
-        assert_eq!(pseudo(&t, "UIGridLayout", "CellPadding"), Some("UDim2.new(0, 6, 0, 6)"));
+        assert_eq!(pseudo(&t, "UIGridLayout", "FillDirectionMaxCells").as_deref(), Some("3"));
+        assert_eq!(pseudo(&t, "UIGridLayout", "CellSize").as_deref(), Some("UDim2.new(0, 68, 0, 68)"));
+        assert_eq!(pseudo(&t, "UIGridLayout", "CellPadding").as_deref(), Some("UDim2.new(0, 6, 0, 6)"));
         assert!(diag.items.is_empty(), "{:?}", diag.items);
     }
 
@@ -4523,9 +4480,9 @@ mod tests {
             decl("column-gap", Value::num_unit(8.0, "px")),
         ];
         let t = translate(&decls, &all_opts(), &mut diag);
-        assert_eq!(pseudo(&t, "UIGridLayout", "FillDirectionMaxCells"), Some("4"));
+        assert_eq!(pseudo(&t, "UIGridLayout", "FillDirectionMaxCells").as_deref(), Some("4"));
         // Three 8px gaps sit between four cells, so each gives up 6px of its quarter.
-        assert_eq!(pseudo(&t, "UIGridLayout", "CellSize"), Some("UDim2.new(0.25, -6, 0, 40)"));
+        assert_eq!(pseudo(&t, "UIGridLayout", "CellSize").as_deref(), Some("UDim2.new(0.25, -6, 0, 40)"));
     }
 
     #[test]
@@ -4540,9 +4497,9 @@ mod tests {
             decl("grid-auto-columns", Value::num_unit(90.0, "px")),
         ];
         let t = translate(&decls, &all_opts(), &mut diag);
-        assert_eq!(pseudo(&t, "UIGridLayout", "FillDirection"), Some("Enum.FillDirection.Vertical"));
-        assert_eq!(pseudo(&t, "UIGridLayout", "FillDirectionMaxCells"), Some("2"));
-        assert_eq!(pseudo(&t, "UIGridLayout", "CellSize"), Some("UDim2.new(0, 90, 0, 30)"));
+        assert_eq!(pseudo(&t, "UIGridLayout", "FillDirection").as_deref(), Some("Enum.FillDirection.Vertical"));
+        assert_eq!(pseudo(&t, "UIGridLayout", "FillDirectionMaxCells").as_deref(), Some("2"));
+        assert_eq!(pseudo(&t, "UIGridLayout", "CellSize").as_deref(), Some("UDim2.new(0, 90, 0, 30)"));
     }
 
     #[test]
@@ -4551,8 +4508,8 @@ mod tests {
         let tracks = Value::list(vec![Value::num_unit(1.0, "fr"), Value::num_unit(80.0, "px")], ListSep::Space);
         let decls = vec![decl("display", Value::str("grid")), decl("grid-template-columns", tracks)];
         let t = translate(&decls, &all_opts(), &mut diag);
-        assert_eq!(pseudo(&t, "UIGridLayout", "CellSize"), None);
-        assert_eq!(pseudo(&t, "UIGridLayout", "FillDirectionMaxCells"), None);
+        assert_eq!(pseudo(&t, "UIGridLayout", "CellSize").as_deref(), None);
+        assert_eq!(pseudo(&t, "UIGridLayout", "FillDirectionMaxCells").as_deref(), None);
         assert!(diag.items.iter().any(|m| m.message.contains("same size")), "{:?}", diag.items);
     }
 
@@ -4563,7 +4520,7 @@ mod tests {
             Value::Call { name: "repeat".to_string(), args: vec![Value::num(2.0), Value::num_unit(50.0, "px")] };
         let decls = vec![decl("display", Value::str("grid")), decl("grid-template-columns", repeat)];
         let t = translate(&decls, &all_opts(), &mut diag);
-        assert_eq!(pseudo(&t, "UIGridLayout", "CellSize"), Some("UDim2.new(0, 50, 0, 100)"));
+        assert_eq!(pseudo(&t, "UIGridLayout", "CellSize").as_deref(), Some("UDim2.new(0, 50, 0, 100)"));
         assert!(diag.items.iter().any(|m| m.message.contains("grid-auto-rows")), "{:?}", diag.items);
     }
 
@@ -4580,9 +4537,9 @@ mod tests {
         };
         let decls = vec![decl("background", gradient)];
         let t = translate(&decls, &all_opts(), &mut diag);
-        assert_eq!(pseudo(&t, "UIGradient", "Rotation"), Some("0"));
-        assert!(pseudo(&t, "UIGradient", "Color").unwrap().starts_with("ColorSequence.new"));
-        assert_eq!(prop(&t, "BackgroundColor3"), Some("Color3.fromRGB(255, 255, 255)"));
+        assert_eq!(pseudo(&t, "UIGradient", "Rotation").as_deref(), Some("0"));
+        assert!(pseudo(&t, "UIGradient", "Color").as_deref().unwrap().starts_with("ColorSequence.new"));
+        assert_eq!(prop(&t, "BackgroundColor3").as_deref(), Some("Color3.fromRGB(255, 255, 255)"));
     }
 
     #[test]
@@ -4594,10 +4551,10 @@ mod tests {
         );
         let decls = vec![decl("transition", value)];
         let t = translate(&decls, &all_opts(), &mut diag);
-        let bg = t.transitions.iter().find(|(n, _)| n == "BackgroundColor3").map(|(_, v)| v.as_str());
-        let bgt = t.transitions.iter().find(|(n, _)| n == "BackgroundTransparency").map(|(_, v)| v.as_str());
-        assert_eq!(bg, Some("TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut)"));
-        assert_eq!(bgt, Some("TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut)"));
+        let bg = t.transitions.iter().find(|(n, _)| n == "BackgroundColor3").map(|(_, v)| luau::render_tween(v));
+        let bgt = t.transitions.iter().find(|(n, _)| n == "BackgroundTransparency").map(|(_, v)| luau::render_tween(v));
+        assert_eq!(bg.as_deref(), Some("TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut)"));
+        assert_eq!(bgt.as_deref(), Some("TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut)"));
     }
 
     #[test]
@@ -4629,9 +4586,15 @@ mod tests {
         let entries = roblox_transitions(&value).unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].0, "BackgroundColor3");
-        assert_eq!(entries[0].1, "TweenInfo.new(1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)");
+        assert_eq!(
+            luau::render_tween(&entries[0].1),
+            "TweenInfo.new(1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)"
+        );
         assert_eq!(entries[1].0, "BackgroundTransparency");
-        assert_eq!(entries[1].1, "TweenInfo.new(1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)");
+        assert_eq!(
+            luau::render_tween(&entries[1].1),
+            "TweenInfo.new(1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)"
+        );
     }
 
     #[test]
@@ -4643,9 +4606,9 @@ mod tests {
         );
         let decls = vec![decl("font", value)];
         let t = translate(&decls, &all_opts(), &mut diag);
-        assert_eq!(prop(&t, "TextSize"), Some("16"));
+        assert_eq!(prop(&t, "TextSize").as_deref(), Some("16"));
         assert_eq!(
-            prop(&t, "FontFace"),
+            prop(&t, "FontFace").as_deref(),
             Some("Font.new(\"rbxasset://fonts/families/GothamSSm.json\", Enum.FontWeight.Bold, Enum.FontStyle.Normal)")
         );
         assert!(diag.items.is_empty());
@@ -4656,12 +4619,12 @@ mod tests {
         let mut diag = Diagnostics::default();
         let decls = vec![decl("visibility", Value::str("hidden")), decl("overflow", Value::str("scroll"))];
         let t = translate(&decls, &all_opts(), &mut diag);
-        assert_eq!(prop(&t, "Visible"), Some("false"));
-        assert_eq!(prop(&t, "ClipsDescendants"), Some("true"));
-        assert_eq!(prop(&t, "ScrollingEnabled"), Some("true"));
-        assert_eq!(prop(&t, "ScrollingDirection"), Some("Enum.ScrollingDirection.XY"));
-        assert_eq!(prop(&t, "AutomaticCanvasSize"), Some("Enum.AutomaticSize.XY"));
-        assert_eq!(prop(&t, "CanvasSize"), Some("UDim2.new()"));
+        assert_eq!(prop(&t, "Visible").as_deref(), Some("false"));
+        assert_eq!(prop(&t, "ClipsDescendants").as_deref(), Some("true"));
+        assert_eq!(prop(&t, "ScrollingEnabled").as_deref(), Some("true"));
+        assert_eq!(prop(&t, "ScrollingDirection").as_deref(), Some("Enum.ScrollingDirection.XY"));
+        assert_eq!(prop(&t, "AutomaticCanvasSize").as_deref(), Some("Enum.AutomaticSize.XY"));
+        assert_eq!(prop(&t, "CanvasSize").as_deref(), Some("UDim2.new(0, 0, 0, 0)"));
     }
 
     #[test]
@@ -4679,19 +4642,19 @@ mod tests {
             decl("opacity", Value::num(0.5)),
         ];
         let t = translate(&decls, &all_opts(), &mut diag);
-        assert_eq!(prop(&t, "ScrollBarThickness"), Some("8"));
-        assert_eq!(prop(&t, "ScrollBarImageColor3"), Some("Color3.fromRGB(255, 0, 0)"));
-        assert_eq!(prop(&t, "ScrollBarImageTransparency"), Some("0.75"));
-        assert_eq!(prop(&t, "VerticalScrollBarInset"), Some("Enum.ScrollBarInset.Always"));
+        assert_eq!(prop(&t, "ScrollBarThickness").as_deref(), Some("8"));
+        assert_eq!(prop(&t, "ScrollBarImageColor3").as_deref(), Some("Color3.fromRGB(255, 0, 0)"));
+        assert_eq!(prop(&t, "ScrollBarImageTransparency").as_deref(), Some("0.75"));
+        assert_eq!(prop(&t, "VerticalScrollBarInset").as_deref(), Some("Enum.ScrollBarInset.Always"));
         assert!(diag.items.is_empty(), "{:?}", diag.items.iter().map(|d| &d.message).collect::<Vec<_>>());
 
         let t = translate(&[decl("scrollbar-width", Value::str("none"))], &all_opts(), &mut diag);
-        assert_eq!(prop(&t, "ScrollBarThickness"), Some("0"));
+        assert_eq!(prop(&t, "ScrollBarThickness").as_deref(), Some("0"));
         let t = translate(&[decl("scrollbar-width", Value::num_unit(4.0, "px"))], &all_opts(), &mut diag);
-        assert_eq!(prop(&t, "ScrollBarThickness"), Some("4"));
+        assert_eq!(prop(&t, "ScrollBarThickness").as_deref(), Some("4"));
         let t = translate(&[decl("scrollbar-color", Value::str("auto"))], &all_opts(), &mut diag);
-        assert_eq!(prop(&t, "ScrollBarImageColor3"), Some("Color3.fromRGB(255, 255, 255)"));
-        assert_eq!(prop(&t, "ScrollBarImageTransparency"), Some("0"));
+        assert_eq!(prop(&t, "ScrollBarImageColor3").as_deref(), Some("Color3.fromRGB(255, 255, 255)"));
+        assert_eq!(prop(&t, "ScrollBarImageTransparency").as_deref(), Some("0"));
         assert!(diag.items.is_empty());
     }
 
@@ -4700,8 +4663,8 @@ mod tests {
         let mut diag = Diagnostics::default();
         let decls = vec![decl("overflow", Value::str("auto")), decl("overflow-x", Value::str("hidden"))];
         let t = translate(&decls, &all_opts(), &mut diag);
-        assert_eq!(prop(&t, "ScrollingDirection"), Some("Enum.ScrollingDirection.Y"));
-        assert_eq!(prop(&t, "AutomaticCanvasSize"), Some("Enum.AutomaticSize.Y"));
+        assert_eq!(prop(&t, "ScrollingDirection").as_deref(), Some("Enum.ScrollingDirection.Y"));
+        assert_eq!(prop(&t, "AutomaticCanvasSize").as_deref(), Some("Enum.AutomaticSize.Y"));
 
         let two = Value::List {
             items: vec![Value::str("scroll"), Value::str("hidden")],
@@ -4709,11 +4672,11 @@ mod tests {
             bracketed: false,
         };
         let t = translate(&[decl("overflow", two)], &all_opts(), &mut diag);
-        assert_eq!(prop(&t, "AutomaticCanvasSize"), Some("Enum.AutomaticSize.X"));
+        assert_eq!(prop(&t, "AutomaticCanvasSize").as_deref(), Some("Enum.AutomaticSize.X"));
 
         let t = translate(&[decl("overflow", Value::str("hidden"))], &all_opts(), &mut diag);
-        assert_eq!(prop(&t, "ClipsDescendants"), Some("true"));
-        assert_eq!(prop(&t, "AutomaticCanvasSize"), None);
+        assert_eq!(prop(&t, "ClipsDescendants").as_deref(), Some("true"));
+        assert_eq!(prop(&t, "AutomaticCanvasSize").as_deref(), None);
         assert!(diag.items.is_empty());
     }
 
@@ -4722,8 +4685,8 @@ mod tests {
         let mut diag = Diagnostics::default();
         let decls = vec![decl("min-width", Value::num_unit(10.0, "px")), decl("max-width", Value::str("none"))];
         let t = translate(&decls, &all_opts(), &mut diag);
-        assert_eq!(pseudo(&t, "UISizeConstraint", "MinSize"), Some("Vector2.new(10, 0)"));
-        assert_eq!(pseudo(&t, "UISizeConstraint", "MaxSize"), Some("Vector2.new(math.huge, math.huge)"));
+        assert_eq!(pseudo(&t, "UISizeConstraint", "MinSize").as_deref(), Some("Vector2.new(10, 0)"));
+        assert_eq!(pseudo(&t, "UISizeConstraint", "MaxSize").as_deref(), Some("Vector2.new(math.huge, math.huge)"));
     }
 
     #[test]
@@ -4734,7 +4697,7 @@ mod tests {
         let token = Value::Call { name: "var".to_string(), args: vec![Value::str("--Accent")] };
         let decls = vec![decl("background-color", token)];
         let t = translate(&decls, &all_opts(), &mut diag);
-        assert_eq!(prop(&t, "BackgroundColor3"), Some("\"$Accent\""));
-        assert_eq!(prop(&t, "BackgroundTransparency"), Some("0"));
+        assert_eq!(prop(&t, "BackgroundColor3").as_deref(), Some("\"$Accent\""));
+        assert_eq!(prop(&t, "BackgroundTransparency").as_deref(), Some("0"));
     }
 }

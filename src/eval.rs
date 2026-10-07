@@ -8,7 +8,7 @@ use std::rc::Rc;
 use crate::ast::*;
 use crate::builtins;
 use crate::diag::{Diagnostics, Error, Result, Span};
-use crate::indented::{self, Flavor};
+use crate::indented;
 use crate::parser::{self, normalize};
 use crate::query::{self, Query};
 use crate::selector::{self, SelectorList, Simple};
@@ -18,14 +18,12 @@ use crate::value::{ListSep, Value};
 pub enum Syntax {
     Scss,
     Sass,
-    Lass,
 }
 
 impl Syntax {
     pub fn from_path(path: &Path) -> Syntax {
         match path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref() {
             Some("sass") => Syntax::Sass,
-            Some("lass") => Syntax::Lass,
             _ => Syntax::Scss,
         }
     }
@@ -37,8 +35,6 @@ pub struct Options {
     pub load_paths: Vec<PathBuf>,
     /// Global variables set before compilation (`--define`).
     pub defines: Vec<(String, Value)>,
-    /// Forces a syntax instead of detecting it from the file extension.
-    pub syntax: Option<Syntax>,
 }
 
 #[derive(Clone, Debug)]
@@ -64,7 +60,8 @@ pub struct OutRule {
     pub decls: Vec<OutDecl>,
     /// Custom properties (`--Name: value`) → StyleRule attributes (design tokens).
     pub tokens: Vec<Token>,
-    pub priority: Option<f64>,
+    /// The `@layer` the rule is in, outermost first; empty when it isn't in one.
+    pub layer: Vec<String>,
     /// Index of the enclosing query container rule, if any.
     pub parent: Option<usize>,
     /// True for Roblox `@Query` container rules.
@@ -97,6 +94,8 @@ pub struct Sheet {
     pub rules: Vec<OutRule>,
     /// Stylesheet-level tokens (from `:root` or top-level custom properties).
     pub tokens: Vec<Token>,
+    /// Every `@layer` path, in the order the layers were first named.
+    pub layers: Vec<Vec<String>>,
     /// Every file read during compilation (for `--watch`).
     pub files: Vec<PathBuf>,
 }
@@ -199,7 +198,8 @@ pub struct Evaluator<'a> {
     current_rule: Option<usize>,
     /// Enclosing query container.
     container: Option<usize>,
-    pending_priority: Option<f64>,
+    /// The `@layer` being evaluated, outermost first.
+    layer: Vec<String>,
     content: Option<Rc<ContentClosure>>,
     /// Prefix for nested properties (`font: { family: x }` → `font-family`).
     decl_prefix: Option<String>,
@@ -212,7 +212,7 @@ pub struct Evaluator<'a> {
 pub fn compile_file(path: &Path, opts: &Options, diag: &mut Diagnostics) -> Result<Sheet> {
     let source =
         std::fs::read_to_string(path).map_err(|e| Error::new(format!("can't read {}: {e}", path.display())))?;
-    let syntax = opts.syntax.unwrap_or_else(|| Syntax::from_path(path));
+    let syntax = Syntax::from_path(path);
     compile_source(&source, path, syntax, opts, diag)
 }
 
@@ -261,6 +261,11 @@ impl Sheet {
         }
         self.rules.append(&mut other.rules);
         self.tokens.append(&mut other.tokens);
+        for layer in other.layers {
+            if !self.layers.contains(&layer) {
+                self.layers.push(layer);
+            }
+        }
         self.files.append(&mut other.files);
     }
 }
@@ -270,10 +275,9 @@ fn parse_source(source: &str, path: &Path, syntax: Syntax) -> Result<Vec<Stmt>> 
     let scss;
     let text = match syntax {
         Syntax::Scss => source,
-        Syntax::Sass | Syntax::Lass => {
-            let flavor = if syntax == Syntax::Sass { Flavor::Sass } else { Flavor::Lass };
-            scss = indented::to_scss(source, flavor)
-                .map_err(|(line, msg)| Error::at(msg, &Span::new(file.clone(), line, 1)))?;
+        Syntax::Sass => {
+            scss =
+                indented::to_scss(source).map_err(|(line, msg)| Error::at(msg, &Span::new(file.clone(), line, 1)))?;
             &scss
         }
     };
@@ -295,7 +299,7 @@ impl<'a> Evaluator<'a> {
             selector: None,
             current_rule: None,
             container: None,
-            pending_priority: None,
+            layer: Vec::new(),
             content: None,
             decl_prefix: None,
             in_function: false,
@@ -307,22 +311,7 @@ impl<'a> Evaluator<'a> {
     // ----- statements -----
 
     fn exec_block(&mut self, stmts: &[Stmt], env: &EnvRef) -> Result<Flow> {
-        for (i, stmt) in stmts.iter().enumerate() {
-            if let StmtKind::Priority(expr) = &stmt.kind {
-                let value = self.eval(expr, env)?;
-                let Value::Number(n) = &value else {
-                    return Err(Error::at(format!("@priority expects a number, got {}", value.inspect()), &stmt.span));
-                };
-                // Applies to the immediately following style rule, else to the enclosing rule.
-                if matches!(stmts.get(i + 1).map(|s| &s.kind), Some(StmtKind::Rule { .. })) {
-                    self.pending_priority = Some(n.value);
-                } else if let Some(idx) = self.current_rule {
-                    self.sheet.rules[idx].priority = Some(n.value);
-                } else {
-                    return Err(Error::at("@priority must be inside a style rule or directly before one", &stmt.span));
-                }
-                continue;
-            }
+        for stmt in stmts {
             match self.exec(stmt, env).map_err(|e| e.or_at(&stmt.span))? {
                 Flow::Normal => {}
                 ret => return Ok(ret),
@@ -554,7 +543,6 @@ impl<'a> Evaluator<'a> {
                 let text = v.to_interp().unwrap_or_else(|_| v.inspect());
                 return Err(Error::at(text, span));
             }
-            StmtKind::Priority(_) => unreachable!("handled in exec_block"),
             StmtKind::AtRoot { selector: sel, body } => {
                 let saved_sel = self.selector.clone();
                 let saved_rule = self.current_rule;
@@ -599,15 +587,13 @@ impl<'a> Evaluator<'a> {
     }
 
     fn style_rule(&mut self, selector: SelectorList, body: &[Stmt], env: &EnvRef, span: &Span) -> Result<()> {
-        let priority =
-            self.pending_priority.take().or_else(|| self.current_rule.and_then(|i| self.sheet.rules[i].priority));
         let idx = self.sheet.rules.len();
         self.sheet.rules.push(OutRule {
             selector: selector.clone(),
             owner: self.current_module,
             decls: Vec::new(),
             tokens: Vec::new(),
-            priority,
+            layer: self.layer.clone(),
             parent: self.container,
             query: false,
             queries: Vec::new(),
@@ -628,6 +614,8 @@ impl<'a> Evaluator<'a> {
         let parsed = if name.starts_with(|c: char| c.is_ascii_uppercase()) {
             // `@PreferredInputTouch { }`: a built-in query, or a StyleQuery the author defined.
             Ok(vec![query::builtin_by_name(name).map_or_else(|| QueryRef::Named(name.to_string()), QueryRef::Known)])
+        } else if name == "layer" {
+            return self.layer_rule(&params_text, body, env, span);
         } else if name == "media" || name == "container" {
             let parsed =
                 if name == "media" { query::parse_media(&params_text) } else { query::parse_container(&params_text) };
@@ -660,7 +648,7 @@ impl<'a> Evaluator<'a> {
             owner: self.current_module,
             decls: Vec::new(),
             tokens: Vec::new(),
-            priority: None,
+            layer: Vec::new(),
             parent: self.container,
             query: true,
             queries: alternatives,
@@ -670,14 +658,13 @@ impl<'a> Evaluator<'a> {
         let saved_rule = self.current_rule;
         // Declarations directly inside the query apply to the enclosing selector (like @media bubbling).
         if let Some(sel) = self.selector.clone() {
-            let priority = self.current_rule.and_then(|i| self.sheet.rules[i].priority);
             self.current_rule = Some(self.sheet.rules.len());
             self.sheet.rules.push(OutRule {
                 selector: sel,
                 owner: self.current_module,
                 decls: Vec::new(),
                 tokens: Vec::new(),
-                priority,
+                layer: self.layer.clone(),
                 parent: Some(container),
                 query: false,
                 queries: Vec::new(),
@@ -690,6 +677,66 @@ impl<'a> Evaluator<'a> {
         self.container = saved_container;
         self.current_rule = saved_rule;
         result.map(|_| ())
+    }
+
+    /// `@layer a, b.c;` fixes the order of layers; `@layer a { ... }` (or an anonymous
+    /// `@layer { ... }`) puts the rules inside in a layer, nested in the enclosing one.
+    fn layer_rule(&mut self, params: &str, body: Option<&[Stmt]>, env: &EnvRef, span: &Span) -> Result<()> {
+        let names: Vec<&str> = params.split(',').map(str::trim).filter(|n| !n.is_empty()).collect();
+        let Some(body) = body else {
+            for name in names {
+                self.declare_layer(name, span)?;
+            }
+            return Ok(());
+        };
+        let path = match names.as_slice() {
+            [name] => self.declare_layer(name, span)?,
+            // An anonymous layer can't be named again, so it gets a name no other layer can have.
+            [] => {
+                let mut path = self.layer.clone();
+                path.push(format!("<anonymous {span}>"));
+                self.sheet.layers.push(path.clone());
+                path
+            }
+            _ => return Err(Error::at("@layer with a block takes a single layer name", span)),
+        };
+        let saved_layer = std::mem::replace(&mut self.layer, path);
+        let saved_rule = self.current_rule;
+        // Declarations directly inside apply to the enclosing selector, in the layer.
+        if let Some(sel) = self.selector.clone() {
+            self.current_rule = Some(self.sheet.rules.len());
+            self.sheet.rules.push(OutRule {
+                selector: sel,
+                owner: self.current_module,
+                decls: Vec::new(),
+                tokens: Vec::new(),
+                layer: self.layer.clone(),
+                parent: self.container,
+                query: false,
+                queries: Vec::new(),
+                span: span.clone(),
+            });
+        }
+        let result = self.exec_block(body, &new_env(Some(env.clone()), false));
+        self.layer = saved_layer;
+        self.current_rule = saved_rule;
+        result.map(|_| ())
+    }
+
+    /// Registers `name` (`a` or `a.b`) inside the current layer, with any parents it implies, and
+    /// returns its full path.
+    fn declare_layer(&mut self, name: &str, span: &Span) -> Result<Vec<String>> {
+        let mut path = self.layer.clone();
+        for part in name.split('.') {
+            if part.is_empty() || !part.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+                return Err(Error::at(format!("`{name}` isn't a valid layer name"), span));
+            }
+            path.push(part.to_string());
+            if !self.sheet.layers.contains(&path) {
+                self.sheet.layers.push(path.clone());
+            }
+        }
+        Ok(path)
     }
 
     /// A query nested in another applies only when both do: combine them into one StyleQuery.
@@ -932,17 +979,16 @@ impl<'a> Evaluator<'a> {
             let dir = joined.parent().map(Path::to_path_buf).unwrap_or_default();
             let Some(file) = joined.file_name().and_then(|f| f.to_str()) else { continue };
             let mut candidates = Vec::new();
-            let has_ext =
-                ["scss", "sass", "lass", "css"].iter().any(|e| file.to_ascii_lowercase().ends_with(&format!(".{e}")));
+            let has_ext = ["scss", "sass", "css"].iter().any(|e| file.to_ascii_lowercase().ends_with(&format!(".{e}")));
             if has_ext {
                 candidates.push(dir.join(file));
                 candidates.push(dir.join(format!("_{file}")));
             } else {
-                for ext in ["scss", "sass", "lass", "css"] {
+                for ext in ["scss", "sass", "css"] {
                     candidates.push(dir.join(format!("{file}.{ext}")));
                     candidates.push(dir.join(format!("_{file}.{ext}")));
                 }
-                for ext in ["scss", "sass", "lass", "css"] {
+                for ext in ["scss", "sass", "css"] {
                     candidates.push(joined.join(format!("_index.{ext}")));
                     candidates.push(joined.join(format!("index.{ext}")));
                 }
@@ -1744,13 +1790,18 @@ mod tests {
     }
 
     #[test]
-    fn priority_and_tokens() {
+    fn layers_and_tokens() {
         let (sheet, _) = compile(
-            ":root { --Accent: #ff0000; } @priority 5; .a { x: 1; @priority 2; &:hover { y: 2 } } .b { @priority 3; z: 1 }",
+            ":root { --Accent: #ff0000; } @layer base, theme.dark; .u { x: 0 } @layer theme { .a { x: 1; &:hover { y: 2 } } @layer dark { .b { z: 1 } } } .c { @layer base { w: 1 } }",
         );
         assert_eq!(sheet.tokens.len(), 1);
-        let pri: Vec<_> = sheet.rules.iter().filter(|r| !r.decls.is_empty()).map(|r| r.priority).collect();
-        assert_eq!(pri, vec![Some(5.0), Some(2.0), Some(3.0)]);
+        let layer = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(sheet.layers, vec![layer(&["base"]), layer(&["theme"]), layer(&["theme", "dark"])]);
+        let layers: Vec<_> = sheet.rules.iter().filter(|r| !r.decls.is_empty()).map(|r| r.layer.clone()).collect();
+        assert_eq!(
+            layers,
+            vec![layer(&[]), layer(&["theme"]), layer(&["theme"]), layer(&["theme", "dark"]), layer(&["base"])]
+        );
     }
 
     #[test]

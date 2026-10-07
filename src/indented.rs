@@ -1,15 +1,9 @@
-//! Indented syntax (.sass / .lass) → SCSS conversion.
+//! Indented syntax (.sass) → SCSS conversion.
 //!
 //! Converts whitespace-indented stylesheets into equivalent SCSS text that can then be fed
 //! to the regular SCSS parser. The output always has exactly the same number of lines as the
 //! input, and every construct stays on the line it came from, so that SCSS parse errors point
 //! at the correct original line.
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Flavor {
-    Sass,
-    Lass,
-}
 
 /// One "logical" grouping of physical lines.
 enum Group {
@@ -23,7 +17,7 @@ enum Group {
 }
 
 /// Converts indented source to SCSS.
-pub fn to_scss(source: &str, flavor: Flavor) -> Result<String, (u32, String)> {
+pub fn to_scss(source: &str) -> Result<String, (u32, String)> {
     let source = source.strip_prefix('\u{FEFF}').unwrap_or(source);
     if source.trim().is_empty() {
         return Ok(source.to_string());
@@ -191,29 +185,13 @@ pub fn to_scss(source: &str, flavor: Flavor) -> Result<String, (u32, String)> {
         };
         let first_comment = cs_first.map(|p| &lines[first][p..]);
         let mut first_content = raw_first.to_string();
-        if flavor == Flavor::Sass {
-            first_content = apply_sass_shorthand(&first_content);
-            first_content = apply_import_quote(&first_content);
-        }
-        if flavor == Flavor::Lass && is_block && ind > 0 {
-            first_content = attach_to_parent(&first_content);
-        }
-        if flavor == Flavor::Lass && !is_block {
-            first_content = raw_luau_value(&first_content);
-        }
+        first_content = apply_sass_shorthand(&first_content);
+        first_content = apply_import_quote(&first_content);
 
         if first == last {
             let mut content = first_content.trim_end().to_string();
-            if flavor == Flavor::Lass && is_block && content.ends_with(':') {
-                content.pop();
-                let trimmed_len = content.trim_end().len();
-                content.truncate(trimmed_len);
-            }
             if is_block {
                 content.push_str(" {");
-            } else if flavor == Flavor::Lass && is_empty_rule(&content) {
-                // lass allowed a selector with no body.
-                content.push_str(" {}");
             } else {
                 content.push(';');
             }
@@ -238,11 +216,6 @@ pub fn to_scss(source: &str, flavor: Flavor) -> Result<String, (u32, String)> {
             };
             let last_comment = cs_last.map(|p| &lines[last][p..]);
             let mut content_last = raw_last.trim_end().to_string();
-            if flavor == Flavor::Lass && is_block && content_last.ends_with(':') {
-                content_last.pop();
-                let trimmed_len = content_last.trim_end().len();
-                content_last.truncate(trimmed_len);
-            }
             if is_block {
                 content_last.push_str(" {");
             } else {
@@ -369,45 +342,6 @@ fn scan_line(line: &str) -> (Option<usize>, i32, bool) {
     (comment_start, depth_delta, ends_comma)
 }
 
-/// A childless lass line that can only be a selector: it starts like one, or has no `:` at all
-/// (lass declarations are `Name: value`; `@` rules and `$` variables are statements).
-fn is_empty_rule(content: &str) -> bool {
-    let t = content.trim();
-    t.starts_with(['.', '#', '&', '>', '[', '*'])
-        || (!t.contains(':') && !t.starts_with(['@', '$', '/']) && !t.is_empty())
-}
-
-/// lass copied declaration values into the output verbatim, so they could hold any Luau, including
-/// table constructors (`ColorSequence.new({ ... })`) that SassScript can't parse. Such values are
-/// wrapped in `luau('...')`, which outlass emits verbatim.
-fn raw_luau_value(content: &str) -> String {
-    let Some((name, value)) = content.split_once(':') else { return content.to_string() };
-    let is_property =
-        !name.trim().is_empty() && name.trim().chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-    if !is_property || !value.contains(['{', '}']) {
-        return content.to_string();
-    }
-    let escaped = value.trim().replace('\\', "\\\\").replace('\'', "\\'");
-    format!("{name}: luau('{escaped}')")
-}
-
-/// lass compiled nesting into nested Roblox StyleRules, whose selectors refer to the parent's element
-/// unless they start with a combinator: a nested `:Hover`, `::UICorner` or `.active` meant the parent
-/// itself. In SCSS that is `&:Hover`, so bare nested selectors get an explicit `&` (`> .x` is unchanged).
-fn attach_to_parent(content: &str) -> String {
-    let indent_len = content.len() - content.trim_start().len();
-    let (indent, selectors) = content.split_at(indent_len);
-    let parts: Vec<String> = selectors
-        .split(',')
-        .map(|part| {
-            let trimmed = part.trim_start();
-            let lead = &part[..part.len() - trimmed.len()];
-            if trimmed.starts_with(['.', '#', ':']) { format!("{lead}&{trimmed}") } else { part.to_string() }
-        })
-        .collect();
-    format!("{indent}{}", parts.join(","))
-}
-
 /// Sass indented shorthands: `=name` → `@mixin name`, `+name` → `@include name` (only when `+`
 /// is immediately followed by an identifier character, so `+ .sibling` selectors are untouched).
 fn apply_sass_shorthand(content: &str) -> String {
@@ -456,8 +390,8 @@ fn apply_import_quote(content: &str) -> String {
 mod tests {
     use super::*;
 
-    fn check(input: &str, flavor: Flavor) -> String {
-        let out = to_scss(input, flavor).expect("should convert");
+    fn check(input: &str) -> String {
+        let out = to_scss(input).expect("should convert");
         assert_eq!(
             out.lines().count(),
             input.lines().count(),
@@ -481,21 +415,21 @@ mod tests {
 
     #[test]
     fn empty_input_unchanged() {
-        assert_eq!(to_scss("", Flavor::Sass).unwrap(), "");
+        assert_eq!(to_scss("").unwrap(), "");
         let only_comments = "// hi\n// there\n";
-        assert_eq!(to_scss(only_comments, Flavor::Sass).unwrap(), only_comments);
+        assert_eq!(to_scss(only_comments).unwrap(), only_comments);
     }
 
     #[test]
     fn simple_statement() {
-        let out = check("a\n  color: red\n", Flavor::Sass);
+        let out = check("a\n  color: red\n");
         assert_eq!(out, "a {\n  color: red;}\n");
     }
 
     #[test]
     fn nested_blocks_multiple_dedents() {
         let input = "a\n  b\n    c\n      d: 1\n  e: 2\nf: 3\n";
-        let out = check(input, Flavor::Sass);
+        let out = check(input);
         assert_balanced(&out);
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines[0], "a {");
@@ -509,7 +443,7 @@ mod tests {
     #[test]
     fn comment_inside_string_is_not_a_comment() {
         let input = "a\n  src: \"rbxasset://fonts/x.json\"\n";
-        let out = check(input, Flavor::Sass);
+        let out = check(input);
         assert!(out.contains("\"rbxasset://fonts/x.json\";"));
         assert!(!out.contains("// fonts"));
     }
@@ -517,14 +451,14 @@ mod tests {
     #[test]
     fn comment_inside_url_is_not_a_comment() {
         let input = "a\n  background: url(http://example.com//path)\n";
-        let out = check(input, Flavor::Sass);
+        let out = check(input);
         assert!(out.contains("url(http://example.com//path);"));
     }
 
     #[test]
     fn trailing_comment_placed_before_punctuation() {
         let input = "a\n  color: red // hi\n";
-        let out = check(input, Flavor::Sass);
+        let out = check(input);
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines[1], "  color: red;} // hi");
     }
@@ -532,7 +466,7 @@ mod tests {
     #[test]
     fn multi_line_selector_list() {
         let input = "a,\nb\n  color: red\n";
-        let out = check(input, Flavor::Sass);
+        let out = check(input);
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines[0], "a,");
         assert_eq!(lines[1], "b {");
@@ -543,7 +477,7 @@ mod tests {
     #[test]
     fn multi_line_parenthesized_map() {
         let input = "$map: (\n  a: 1,\n  b: 2\n)\nc\n  color: red\n";
-        let out = check(input, Flavor::Sass);
+        let out = check(input);
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines[0], "$map: (");
         assert_eq!(lines[1], "  a: 1,");
@@ -557,7 +491,7 @@ mod tests {
     #[test]
     fn mixin_and_include_shorthand() {
         let input = "=transition\n  a: 1\n+transition\n";
-        let out = check(input, Flavor::Sass);
+        let out = check(input);
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines[0], "@mixin transition {");
         assert_eq!(lines[1], "  a: 1;}");
@@ -567,28 +501,28 @@ mod tests {
     #[test]
     fn plus_not_followed_by_ident_is_untouched() {
         let input = "a\n  + .sibling\n    color: red\n";
-        let out = check(input, Flavor::Sass);
+        let out = check(input);
         assert!(out.contains("+ .sibling {"));
     }
 
     #[test]
     fn import_quoting() {
         let input = "@import foo, bar\n";
-        let out = check(input, Flavor::Sass);
+        let out = check(input);
         assert_eq!(out, "@import \"foo\", \"bar\";\n");
     }
 
     #[test]
     fn import_quoted_and_url_left_alone() {
         let input = "@import \"foo\", url(bar.css)\n";
-        let out = check(input, Flavor::Sass);
+        let out = check(input);
         assert_eq!(out, "@import \"foo\", url(bar.css);\n");
     }
 
     #[test]
     fn if_else() {
         let input = "@if $x == 1\n  a: 1\n@else\n  a: 2\n";
-        let out = check(input, Flavor::Sass);
+        let out = check(input);
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines[0], "@if $x == 1 {");
         assert_eq!(lines[1], "  a: 1;}");
@@ -600,7 +534,7 @@ mod tests {
     #[test]
     fn block_comment() {
         let input = "/* header\n   still comment\na\n  color: red\n";
-        let out = check(input, Flavor::Sass);
+        let out = check(input);
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines[0], "/* header");
         assert_eq!(lines[1], "   still comment */");
@@ -611,52 +545,21 @@ mod tests {
     #[test]
     fn mixed_indentation_error() {
         let input = "a\n \tb\n";
-        let err = to_scss(input, Flavor::Sass).unwrap_err();
+        let err = to_scss(input).unwrap_err();
         assert_eq!(err.0, 2);
     }
 
     #[test]
     fn inconsistent_style_across_lines_error() {
         let input = "a\n  b: 1\n\tc: 2\n";
-        let err = to_scss(input, Flavor::Sass).unwrap_err();
+        let err = to_scss(input).unwrap_err();
         assert_eq!(err.0, 3);
     }
 
     #[test]
     fn bad_dedent_error() {
         let input = "a\n    b\n        c: 1\n  d: 2\n";
-        let err = to_scss(input, Flavor::Sass).unwrap_err();
+        let err = to_scss(input).unwrap_err();
         assert_eq!(err.0, 4);
-    }
-
-    #[test]
-    fn lass_priority_and_trailing_colon() {
-        let input = "@priority(10)\nSelector:\n\tKey: value\n";
-        let out = check(input, Flavor::Lass);
-        let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines[0], "@priority(10);");
-        assert_eq!(lines[1], "Selector {");
-        assert_eq!(lines[2], "\tKey: value;}");
-    }
-
-    #[test]
-    fn lass_no_shorthand() {
-        let input = "=notamixin\n\ta: 1\n";
-        let out = check(input, Flavor::Lass);
-        // '=' is left untouched in lass flavor.
-        assert!(out.lines().next().unwrap().starts_with("=notamixin"));
-    }
-
-    #[test]
-    fn lass_full_example() {
-        let input = "@mixin transition\r\n\tTransition: BackgroundColor3, BackgroundTransparency\r\n\r\n@priority(10)\r\nTextButton, TextLabel\r\n\tTextXAlignment: Enum.TextXAlignment.Left\r\n\tAutomaticSize: Enum.AutomaticSize.X\r\n\tRichText: true\r\n\tTextColor3: Color3.fromRGB(255, 255, 255)\r\n\tTextSize: 20\r\n\tFontFace: Font.new \"rbxasset://fonts/families/SourceSansPro.json\"\r\n\tBorderSizePixel: 0\r\n\t@include transition\r\n\r\nTextButton::UICorner, .solid::UICorner\r\n\tCornerRadius: UDim.new(0, 4)\r\n\r\nFrame\r\n\tBorderSizePixel: 0\r\n\tBackgroundTransparency: 1\r\n\r\n.solid\r\n\tBackgroundColor3: Color3.fromRGB(0, 0, 0)\r\n\tBackgroundTransparency: 0.2\r\n\t\r\n:root\r\n\t--Red: Color3.fromRGB(1, 0, 0)\r\n\r\nTextLabel, TextButton\r\n\t--Blue: Color3.fromRGB(0, 0, 1)\r\n\t& > .title\r\n\t\tFontFace: Font.new(\"rbxasset://fonts/families/SourceSansPro.json\", Enum.FontWeight.Bold, Enum.FontStyle.Normal)\r\n\r\nImageLabel\r\n\t// Priority only works on the bottom most selector\r\n\t// Pretty sure this is intended behavior\r\n\t@priority(1)\r\n\t&:Hover\r\n\t\tImageTransparency: 0.5\r\n\r\n.a, .b\r\n\t.h, .j\r\n\t\tE: 1\r\n";
-        let out = check(input, Flavor::Lass);
-        assert_balanced(&out);
-        assert!(out.contains("TextButton, TextLabel {"));
-        assert!(out.contains("\tTextXAlignment: Enum.TextXAlignment.Left;"));
-        assert!(out.contains("@priority(10);"));
-        // The ImageLabel block (opened, then &:Hover nested inside) must fully close.
-        assert!(out.contains("ImageTransparency: 0.5;}}"));
-        assert!(out.contains("ImageLabel {"));
     }
 }

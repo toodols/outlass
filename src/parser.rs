@@ -764,11 +764,6 @@ impl Parser {
                     _ => StmtKind::Error(value),
                 }
             }
-            "priority" => {
-                let value = self.expression_list()?;
-                self.expect_statement_end()?;
-                StmtKind::Priority(value)
-            }
             "at-root" => {
                 let selector = if self.peek_is('{') {
                     None
@@ -1313,7 +1308,7 @@ impl Parser {
                 Ok(Expr::Value(Value::str(format!("#{text}"))))
             }
             Some(c) if c.is_ascii_digit() || c == '.' => self.number(),
-            // A `*` can't start an arithmetic expression, so it's the literal (lass: `Transition: * 0.5s`).
+            // A `*` can't start an arithmetic expression, so it's the literal (`Transition: * 0.5s`).
             Some('*') => {
                 self.pos += 1;
                 Ok(Expr::Value(Value::str("*")))

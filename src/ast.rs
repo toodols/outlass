@@ -192,8 +192,6 @@ pub enum StmtKind {
     Debug(Expr),
     Warn(Expr),
     Error(Expr),
-    /// outlass extension: `@priority <n>;`
-    Priority(Expr),
     AtRoot {
         selector: Option<Interp>,
         body: Vec<Stmt>,

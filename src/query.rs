@@ -274,7 +274,7 @@ impl Query {
                         cs.next().map(|f| f.to_ascii_uppercase().to_string() + cs.as_str()).unwrap_or_default()
                     })
                     .collect();
-                format!("Container{}", luau::attribute_name(&pascal))
+                format!("Container{}", crate::roblox::attribute_name(&pascal))
             }
         };
         let parts = [
@@ -304,36 +304,32 @@ impl Query {
     }
 
     /// The StyleQuery conditions as (property, Luau value) pairs.
-    pub fn conditions(&self) -> Vec<(String, String)> {
+    pub fn conditions(&self) -> Vec<(String, luau::Value)> {
         let c = &self.conditions;
         let mut out = Vec::new();
         if c.min_width.is_some() || c.min_height.is_some() {
-            out.push(("MinSize".into(), luau::vector2(c.min_width.unwrap_or(0.0), c.min_height.unwrap_or(0.0))));
+            out.push(("MinSize".into(), luau::Value::Vector2(c.min_width.unwrap_or(0.0), c.min_height.unwrap_or(0.0))));
         }
         if c.max_width.is_some() || c.max_height.is_some() {
             out.push((
                 "MaxSize".into(),
-                luau::vector2(c.max_width.unwrap_or(f64::INFINITY), c.max_height.unwrap_or(f64::INFINITY)),
+                luau::Value::Vector2(c.max_width.unwrap_or(f64::INFINITY), c.max_height.unwrap_or(f64::INFINITY)),
             ));
         }
         if c.min_aspect.is_some() || c.max_aspect.is_some() {
             out.push((
                 "AspectRatioRange".into(),
-                format!(
-                    "NumberRange.new({}, {})",
-                    luau::number(c.min_aspect.unwrap_or(0.0)),
-                    luau::number(c.max_aspect.unwrap_or(f64::INFINITY))
-                ),
+                luau::Value::NumberRange(c.min_aspect.unwrap_or(0.0), c.max_aspect.unwrap_or(f64::INFINITY)),
             ));
         }
         if let Some(input) = c.preferred_input {
-            out.push(("PreferredInput".into(), format!("Enum.PreferredInput.{input}")));
+            out.push(("PreferredInput".into(), luau::Value::enum_item("PreferredInput", input)));
         }
         if let Some(reduced) = c.reduced_motion {
-            out.push(("ReducedMotionEnabled".into(), reduced.to_string()));
+            out.push(("ReducedMotionEnabled".into(), luau::Value::Bool(reduced)));
         }
         if let Some(size) = c.display_size {
-            out.push(("ViewportDisplaySize".into(), format!("Enum.DisplaySize.{size}")));
+            out.push(("ViewportDisplaySize".into(), luau::Value::enum_item("DisplaySize", size)));
         }
         out
     }
@@ -447,7 +443,7 @@ mod tests {
         assert!(q.builtin().is_none());
         assert_eq!(q.name(), "MediaMinWidth900MinAspect1");
         assert_eq!(
-            q.conditions(),
+            q.conditions().iter().map(|(k, v)| (k.clone(), luau::render(v))).collect::<Vec<_>>(),
             vec![
                 ("MinSize".to_string(), "Vector2.new(900, 0)".to_string()),
                 ("AspectRatioRange".to_string(), "NumberRange.new(1, math.huge)".to_string())

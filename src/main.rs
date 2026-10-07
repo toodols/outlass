@@ -8,6 +8,7 @@ mod indented;
 mod luau;
 mod parser;
 mod query;
+mod roblox;
 mod selector;
 mod value;
 
@@ -19,13 +20,13 @@ use std::time::{Duration, SystemTime};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 
 use crate::approx::{ApproxOptions, Group};
-use crate::codegen::{Cascade, CodegenOptions};
+use crate::codegen::CodegenOptions;
 use crate::diag::{Diagnostics, Level};
 use crate::eval::{Options, Sheet, Syntax};
-use crate::luau::{ColorFormat, LuauOptions};
+use crate::roblox::ValueOptions;
 
 const LONG_ABOUT: &str = "\
-Compiles SCSS (plus indented .sass and legacy .lass) into a Luau module that builds and \
+Compiles SCSS (plus indented .sass) into a Luau module that builds and \
 returns a Roblox StyleSheet made of StyleRules.
 
 Supported Sass features: variables (!default, !global), nesting and the parent selector \
@@ -38,17 +39,18 @@ the built-in module functions (see `outlass functions`).
 Roblox mapping:
   * Selectors: `Frame`, `.Tag`, `#Name`, `::UICorner`; the descendant combinator (space) \
 becomes `>>`; :hover → :Hover, :active → :Press, :disabled → :NonInteractable.
-  * Declarations with PascalCase names are Roblox properties; their values are emitted as \
-Luau (Enum.Font.Gotham, UDim2.new(0, 10, 0, 20), Color3.fromRGB(...), colors like #fff, \
-quoted strings, numbers; px is dropped, 50% → 0.5, 1s/1000ms → 1).
+  * Declarations with PascalCase names are Roblox properties. Their values are Roblox values \
+(Enum.Font.Gotham, UDim2.new(0, 10, 0, 20), Color3.fromRGB(...), colors like #fff, quoted \
+strings, numbers; px is dropped, 50% → 0.5, 1s/1000ms → 1). Anything else is ignored with a \
+warning, so the generated code can only build a StyleSheet; luau(\"...\") inserts raw Luau, but \
+only with --allow-raw-luau.
   * Custom properties (--Name: value) become StyleRule attributes (design tokens); in \
 :root or at the top level they go on the StyleSheet. var(--Name) references a token (\"$Name\"). \
 Their values are raw text, as in CSS and dart-sass, and are read back as a CSS value, so \
 substitute variables with #{$var} rather than writing $var on its own.
   * The CSS cascade sets StyleRule.Priority: `!important` declarations beat normal ones, \
-then higher `@priority` tiers, then more specific selectors, then later rules. `@priority <n>;` \
-puts the rule it's in (or the rule directly after it) in tier n, like a CSS cascade layer; \
-nested rules inherit their parent's tier. `--cascade none` emits only explicit priorities.
+then later `@layer`s (styles outside any layer beat every layer; `!important` reverses the layer \
+order), then more specific selectors, then later rules.
   * Like a browser's user-agent stylesheet, a lowest-priority rule turns RichText on for \
 TextLabel, TextButton and TextBox, and (with --approx=size) sizes every class from its content, \
 since a fresh Roblox element is 0x0. A rule that sets width and height turns that back off. Opt out \
@@ -80,6 +82,7 @@ Examples:
   outlass ui.scss --approx=opacity,color  Translate only some groups
   outlass ui.scss -D accent=#ff8800       Override `$accent: ... !default` in ui.scss
   outlass ui.scss --emit css -o -         Show the evaluated SCSS as plain CSS (debugging)
+  outlass ui.scss --emit json -o -        Show the compiled StyleSheet as JSON
   outlass ui.scss --watch                 Recompile whenever an input or import changes
   outlass properties                      List every CSS property --approx understands
   outlass properties border-radius        Explain one property's translation
@@ -129,7 +132,7 @@ enum Command {
         Also available: if(), call(), get-function(), variable-exists(), global-variable-exists(), \
         function-exists(), mixin-exists(), content-exists(), module-variables(), module-functions(), \
         calc(), and the Roblox helpers var(--Token) / token(Name) (token reference \"$Name\") and \
-        luau(\"code\") (raw Luau). Any other call, like UDim2.new(0, 4, 0, 4), is emitted as Luau.")]
+        luau(\"code\") (raw Luau, only with --allow-raw-luau). Roblox constructors like UDim2.new(0, 4, 0, 4)         become the value they construct.")]
     Functions {
         /// Only show functions whose module, name or summary contains this text
         filter: Option<String>,
@@ -137,34 +140,26 @@ enum Command {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-enum SyntaxArg {
-    /// Detect from the extension: .sass → indented Sass, .lass → lass, anything else → SCSS
-    Auto,
-    Scss,
-    /// Indented Sass syntax
-    Sass,
-    /// The indented syntax of the original `lass` compiler
-    Lass,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum Emit {
     /// A Luau module that creates and returns the StyleSheet
     Luau,
+    /// The compiled StyleSheet as JSON: the rules and typed values the Luau is generated from
+    Json,
     /// The evaluated stylesheet as plain CSS, before Roblox translation (for debugging)
     Css,
 }
 
 #[derive(Args)]
 struct BuildArgs {
-    /// Input files or glob patterns (.scss, .sass, .lass). Use `-` to read SCSS from stdin.
+    /// Input files or glob patterns (.scss, .sass; the syntax follows the extension). Use `-`
+    /// to read SCSS from stdin.
     ///
     /// Files whose name starts with `_` (partials) are skipped when matched by a glob pattern.
     #[arg(required = true, value_name = "INPUT")]
     inputs: Vec<String>,
 
     /// Output file, or `-` for stdout. Only valid with a single input or with --merge
-    /// [default: the input path with a .luau (or .css) extension]
+    /// [default: the input path with a .luau (or .json/.css) extension]
     #[arg(short, long, value_name = "FILE")]
     output: Option<String>,
 
@@ -190,10 +185,6 @@ struct BuildArgs {
     )]
     approx: Vec<Group>,
 
-    /// Input syntax
-    #[arg(long, value_enum, default_value_t = SyntaxArg::Auto)]
-    syntax: SyntaxArg,
-
     /// Additional directory to search for @use/@forward/@import targets (repeatable)
     #[arg(short = 'I', long = "load-path", value_name = "DIR")]
     load_paths: Vec<PathBuf>,
@@ -204,38 +195,15 @@ struct BuildArgs {
     #[arg(short = 'D', long = "define", value_name = "NAME=VALUE")]
     defines: Vec<String>,
 
-    /// The @priority tier of rules that don't set one [default: 0]. With `--cascade none` this is
-    /// emitted as their StyleRule.Priority
-    #[arg(long, value_name = "N", allow_negative_numbers = true)]
-    default_priority: Option<f64>,
-
-    /// How StyleRule.Priority is decided
-    #[arg(long, value_enum, default_value_t = Cascade::Css)]
-    cascade: Cascade,
-
-    /// How colors are written in Luau
-    #[arg(long, value_enum, default_value_t = ColorFormat::Rgb)]
-    color_format: ColorFormat,
-
-    /// Pixels per em/rem when converting font-relative lengths
-    #[arg(long, value_name = "PX", default_value_t = 16.0)]
-    rem: f64,
-
-    /// Font family used by --approx when font-weight/font-style are set without font-family
-    #[arg(long, value_name = "ASSET", default_value = "rbxasset://fonts/families/SourceSansPro.json")]
-    default_font: String,
-
     /// What to generate
     #[arg(long, value_enum, default_value_t = Emit::Luau)]
     emit: Emit,
 
-    /// StyleSheet.Name in the generated code [default: the input file's stem]
-    #[arg(long, value_name = "NAME")]
-    sheet_name: Option<String>,
-
-    /// Don't write the "Generated by outlass" header comment
+    /// Let `luau("...")` insert raw Luau into the generated code. Raw Luau can do anything a script
+    /// can, so only allow it for stylesheets you trust; without it, the output can only build a
+    /// StyleSheet
     #[arg(long)]
-    no_header: bool,
+    allow_raw_luau: bool,
 
     /// Recompile whenever an input file or anything it imports changes
     #[arg(short, long)]
@@ -384,6 +352,7 @@ fn plan(args: &BuildArgs) -> Result<Vec<Job>, String> {
     let files = expand_inputs(&args.inputs)?;
     let ext = match args.emit {
         Emit::Luau => "luau",
+        Emit::Json => "json",
         Emit::Css => "css",
     };
     let stem = |p: &Path| p.file_stem().and_then(|s| s.to_str()).unwrap_or("StyleSheet").to_string();
@@ -391,8 +360,7 @@ fn plan(args: &BuildArgs) -> Result<Vec<Job>, String> {
 
     if args.merge {
         let output = args.output.as_deref().map(to_output).unwrap_or_default();
-        let name =
-            args.sheet_name.clone().or_else(|| output.as_deref().map(stem)).unwrap_or_else(|| "StyleSheet".into());
+        let name = output.as_deref().map(stem).unwrap_or_else(|| "StyleSheet".into());
         return Ok(vec![Job { inputs: files, output, sheet_name: name }]);
     }
     if args.output.is_some() && files.len() > 1 {
@@ -414,8 +382,7 @@ fn plan(args: &BuildArgs) -> Result<Vec<Job>, String> {
             } else {
                 Some(input.with_extension(ext))
             };
-            let sheet_name =
-                args.sheet_name.clone().unwrap_or_else(|| if is_stdin { "StyleSheet".into() } else { stem(&input) });
+            let sheet_name = if is_stdin { "StyleSheet".into() } else { stem(&input) };
             Job { inputs: vec![input], output, sheet_name }
         })
         .collect())
@@ -429,32 +396,16 @@ fn eval_options(args: &BuildArgs) -> Result<Options, String> {
         let value = eval::evaluate_expression(value).map_err(|e| format!("--define {name}: {}", e.message))?;
         defines.push((name.to_string(), value));
     }
-    Ok(Options {
-        load_paths: args.load_paths.clone(),
-        defines,
-        syntax: match args.syntax {
-            SyntaxArg::Auto => None,
-            SyntaxArg::Scss => Some(Syntax::Scss),
-            SyntaxArg::Sass => Some(Syntax::Sass),
-            SyntaxArg::Lass => Some(Syntax::Lass),
-        },
-    })
+    Ok(Options { load_paths: args.load_paths.clone(), defines })
 }
 
 fn codegen_options(args: &BuildArgs, sheet_name: &str, header: Option<String>) -> CodegenOptions {
-    let luau = LuauOptions { color_format: args.color_format, rem_px: args.rem };
+    let values = ValueOptions { allow_raw_luau: args.allow_raw_luau };
     CodegenOptions {
-        approx: ApproxOptions {
-            groups: Group::expand(&args.approx),
-            luau: luau.clone(),
-            default_font: args.default_font.clone(),
-            strict: args.strict,
-        },
-        luau,
-        default_priority: args.default_priority,
-        cascade: args.cascade,
+        approx: ApproxOptions { groups: Group::expand(&args.approx), strict: args.strict },
+        values,
         sheet_name: sheet_name.to_string(),
-        header: if args.no_header { None } else { header },
+        header,
     }
 }
 
@@ -471,7 +422,7 @@ fn run_job(job: &Job, args: &BuildArgs, opts: &Options) -> (Vec<PathBuf>, bool) 
                 eprintln!("error: can't read stdin: {e}");
                 return (files, false);
             }
-            eval::compile_source(&source, Path::new("<stdin>"), opts.syntax.unwrap_or(Syntax::Scss), opts, &mut diag)
+            eval::compile_source(&source, Path::new("<stdin>"), Syntax::Scss, opts, &mut diag)
         } else {
             eval::compile_file(input, opts, &mut diag)
         };
@@ -503,11 +454,19 @@ fn run_job(job: &Job, args: &BuildArgs, opts: &Options) -> (Vec<PathBuf>, bool) 
             .join(", ");
     let output = match args.emit {
         Emit::Luau => codegen::emit_luau(&combined, &codegen_options(args, &job.sheet_name, Some(label)), &mut diag),
+        Emit::Json => codegen::emit_json(&combined, &codegen_options(args, &job.sheet_name, None), &mut diag),
         Emit::Css => codegen::emit_css(&combined),
     };
     print_diagnostics(&diag, args);
     if diag.error_count() > 0 {
-        eprintln!("error: {} layout difference(s) from CSS and --strict is set; no output written", diag.error_count());
+        if args.strict {
+            eprintln!(
+                "error: {} layout difference(s) from CSS and --strict is set; no output written",
+                diag.error_count()
+            );
+        } else {
+            eprintln!("error: {} error(s); no output written", diag.error_count());
+        }
         return (files, false);
     }
     if args.deny_warnings && diag.warning_count() > 0 {

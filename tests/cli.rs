@@ -86,28 +86,6 @@ fn compile(scss: &str, extra_args: &[&str]) -> (String, String) {
     (stdout, stderr)
 }
 
-fn fixture(name: &str) -> String {
-    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.push("tests");
-    p.push("fixtures");
-    p.push(name);
-    p.to_str().unwrap().to_string()
-}
-
-// ---------- 1. lass compatibility ----------
-
-#[test]
-fn lass_file_compiles_and_matches_expected_shape() {
-    let path = fixture("example.lass");
-    let (code, stdout, stderr) = run(&[&path, "-o", "-", "--cascade", "none"], None);
-    assert_eq!(code, 0, "stderr: {stderr}");
-    assert!(stdout.contains(r#"rule(sheet, "TextButton, TextLabel", 10, {"#), "stdout:\n{stdout}");
-    assert!(stdout.contains("SetPropertyTransitions"), "stdout:\n{stdout}");
-    assert!(stdout.contains(r#"sheet:SetAttribute("Red", Color3.fromRGB(1, 0, 0))"#), "stdout:\n{stdout}");
-    assert!(stdout.contains(r#""ImageLabel:Hover", 1"#), "stdout:\n{stdout}");
-    assert!(stdout.trim_end().ends_with("return sheet"), "stdout:\n{stdout}");
-}
-
 // ---------- 2. default output paths ----------
 
 #[test]
@@ -275,14 +253,7 @@ fn load_path_resolves_use_target() {
     assert!(stdout.contains(r#"rule(sheet, ".a", "#), "stdout:\n{stdout}");
 }
 
-// ---------- 9. --syntax ----------
-
-#[test]
-fn syntax_sass_compiles_indented_stdin() {
-    let (code, stdout, stderr) = run(&["--syntax", "sass", "-", "-o", "-"], Some(".a\n  BackgroundTransparency: 1\n"));
-    assert_eq!(code, 0, "stderr: {stderr}");
-    assert!(stdout.contains("BackgroundTransparency = 1"), "stdout:\n{stdout}");
-}
+// ---------- 9. syntax detection ----------
 
 #[test]
 fn dot_sass_extension_is_autodetected() {
@@ -293,18 +264,7 @@ fn dot_sass_extension_is_autodetected() {
     assert!(stdout.contains("BackgroundTransparency = 1"), "stdout:\n{stdout}");
 }
 
-// ---------- 10. --default-priority / --cascade / @priority ----------
-
-#[test]
-fn default_priority_is_emitted_as_is_without_the_css_cascade() {
-    let (stdout, _stderr) = compile(
-        ".a { Color: 1 }\n.b { Color: 2 }\n@priority 9;\n.c { Color: 3 }\n",
-        &["--cascade", "none", "--default-priority", "5"],
-    );
-    assert!(stdout.contains(r#"rule(sheet, ".a", 5, {"#), "stdout:\n{stdout}");
-    assert!(stdout.contains(r#"rule(sheet, ".b", 5, {"#), "stdout:\n{stdout}");
-    assert!(stdout.contains(r#"rule(sheet, ".c", 9, {"#), "stdout:\n{stdout}");
-}
+// ---------- 10. the cascade and @layer ----------
 
 /// The priority each selector got, in output order.
 fn priorities(stdout: &str) -> Vec<(String, String)> {
@@ -337,16 +297,18 @@ fn css_cascade_orders_by_specificity_then_source_order() {
 }
 
 #[test]
-fn priority_tiers_beat_specificity_and_default_priority_sets_the_default_tier() {
-    let (out, _) = compile("@priority 1;\n.a { Color: 1 }\n#b { Color: 2 }\n", &[]);
-    assert!(priority_of(&out, ".a") > priority_of(&out, "#b"), "{out}");
-    let (out, _) = compile("@priority 1;\n.a { Color: 1 }\n#b { Color: 2 }\n", &["--default-priority", "5"]);
-    assert!(priority_of(&out, ".a") < priority_of(&out, "#b"), "{out}");
+fn layers_beat_specificity_and_unlayered_styles_beat_layers() {
+    let (out, _) = compile(
+        "@layer base, theme;\n@layer theme { .a { Color: 1 } }\n@layer base { #b { Color: 2 } }\n.c { Color: 3 }\n",
+        &[],
+    );
+    assert!(priority_of(&out, ".a") > priority_of(&out, "#b"), "a later layer beats specificity:\n{out}");
+    assert!(priority_of(&out, ".c") > priority_of(&out, ".a"), "unlayered styles beat every layer:\n{out}");
 }
 
 #[test]
 fn important_declarations_beat_everything_normal() {
-    let (out, stderr) = compile("@priority 50;\n#x.y { Color: 3 }\n.a { Color: 1 !important; Other: 2 }\n", &[]);
+    let (out, stderr) = compile("#x.y { Color: 3 }\n.a { Color: 1 !important; Other: 2 }\n", &[]);
     assert!(!stderr.contains("important"), "{stderr}");
     let rules = priorities(&out);
     let a: Vec<_> = rules.iter().filter(|(s, _)| s == ".a").collect();
@@ -359,62 +321,52 @@ fn important_declarations_beat_everything_normal() {
 }
 
 #[test]
-fn important_is_ignored_with_a_warning_without_the_css_cascade() {
-    let (_, stderr) = compile(".a { Color: 1 !important }", &["--cascade", "none"]);
-    assert!(stderr.contains("!important"), "{stderr}");
+fn important_reverses_the_layer_order() {
+    let (out, _) = compile(
+        "@layer base, theme;\n@layer base { .a { Color: 1 !important } }\n@layer theme { .b { Color: 2 !important } }\n\
+         .c { Color: 3 !important }\n",
+        &[],
+    );
+    assert!(priority_of(&out, ".a") > priority_of(&out, ".b"), "an earlier layer's !important wins:\n{out}");
+    assert!(priority_of(&out, ".b") > priority_of(&out, ".c"), "a layer's !important beats an unlayered one:\n{out}");
 }
-// ---------- 11. --color-format ----------
+// ---------- 11. colours ----------
 
 #[test]
-fn color_format_hex() {
-    let (stdout, _stderr) = compile(".a { Color: rgb(255, 0, 0) }", &["--color-format", "hex"]);
-    assert!(stdout.contains(r##"Color3.fromHex("#ff0000")"##), "stdout:\n{stdout}");
+fn colors_become_from_rgb() {
+    let (stdout, _stderr) = compile(".a { Color: rgb(255, 0, 0) }", &[]);
+    assert!(stdout.contains("Color3.fromRGB(255, 0, 0)"), "stdout:\n{stdout}");
+}
+
+// ---------- 12. rem ----------
+
+#[test]
+fn rem_is_16px_on_roblox_properties() {
+    let (stdout, _stderr) = compile(".a { TextSize: 2rem }", &[]);
+    assert!(stdout.contains("TextSize = 32"), "stdout:\n{stdout}");
 }
 
 #[test]
-fn color_format_float() {
-    let (stdout, _stderr) = compile(".a { Color: rgb(255, 0, 0) }", &["--color-format", "float"]);
-    assert!(stdout.contains("Color3.new(1, 0, 0)"), "stdout:\n{stdout}");
+fn rem_is_16px_in_approx_font_size() {
+    let (stdout, _stderr) = compile(".a { font-size: 1.5rem }", &["--approx"]);
+    assert!(stdout.contains("TextSize = 24"), "stdout:\n{stdout}");
 }
 
-// ---------- 12. --rem ----------
-
-#[test]
-fn rem_scales_rem_units_on_roblox_properties() {
-    let (stdout, _stderr) = compile(".a { TextSize: 2rem }", &["--rem", "10"]);
-    assert!(stdout.contains("TextSize = 20"), "stdout:\n{stdout}");
-}
-
-#[test]
-fn rem_scales_approx_font_size() {
-    let (stdout, _stderr) = compile(".a { font-size: 1.5rem }", &["--rem", "10", "--approx"]);
-    assert!(stdout.contains("TextSize = 15"), "stdout:\n{stdout}");
-}
-
-// ---------- 13. --default-font ----------
+// ---------- 13. default font ----------
 
 #[test]
 fn default_font_used_when_only_weight_given() {
-    let (stdout, _stderr) =
-        compile(".a { font-weight: bold }", &["--approx", "--default-font", "rbxasset://fonts/families/Foo.json"]);
-    assert!(stdout.contains("rbxasset://fonts/families/Foo.json"), "stdout:\n{stdout}");
+    let (stdout, _stderr) = compile(".a { font-weight: bold }", &["--approx"]);
+    assert!(stdout.contains("rbxasset://fonts/families/SourceSansPro.json"), "stdout:\n{stdout}");
 }
 
-// ---------- 14. --sheet-name / --no-header ----------
+// ---------- 14. sheet name / header ----------
 
 #[test]
-fn sheet_name_sets_stylesheet_name() {
-    let (stdout, _stderr) = compile(".a { Color: 1 }", &["--sheet-name", "Foo"]);
-    assert!(stdout.contains(r#"sheet.Name = "Foo""#), "stdout:\n{stdout}");
-}
-
-#[test]
-fn header_present_by_default_and_removed_with_no_header() {
-    let (with_header, _) = compile(".a { Color: 1 }", &[]);
-    assert!(with_header.contains("Generated by outlass"), "stdout:\n{with_header}");
-
-    let (without_header, _) = compile(".a { Color: 1 }", &["--no-header"]);
-    assert!(!without_header.contains("Generated by outlass"), "stdout:\n{without_header}");
+fn stylesheet_is_named_after_the_input_and_has_a_header() {
+    let (stdout, _stderr) = compile(".a { Color: 1 }", &[]);
+    assert!(stdout.contains(r#"sheet.Name = "in""#), "stdout:\n{stdout}");
+    assert!(stdout.contains("Generated by outlass"), "stdout:\n{stdout}");
 }
 
 // ---------- 15. -q / --deny-warnings ----------
@@ -573,15 +525,13 @@ fn var_reference_becomes_token_string() {
 }
 
 #[test]
-fn priority_at_rule_sets_priority_and_nested_inherits() {
-    let scss = ".a {\n  @priority 3;\n  Color: 1;\n  &:hover {\n    Color: 2;\n  }\n}\n#b { Color: 3 }\n";
-    let (stdout, _stderr) = compile(scss, &["--cascade", "none"]);
-    assert!(stdout.contains(r#"rule(sheet, ".a", 3, {"#), "stdout:\n{stdout}");
-    assert!(stdout.contains(r#"rule(sheet, ".a:Hover", 3, {"#), "stdout:\n{stdout}");
-    // With the CSS cascade, tier 3 beats the more specific #b, and :hover beats its base rule.
-    let (stdout, _stderr) = compile(scss, &[]);
-    assert!(priority_of(&stdout, ".a") > priority_of(&stdout, "#b"), "stdout:\n{stdout}");
-    assert!(priority_of(&stdout, ".a:Hover") > priority_of(&stdout, ".a"), "stdout:\n{stdout}");
+fn nested_layers_rank_below_their_parents_own_rules() {
+    let scss = "@layer a {\n  .x {\n    Color: 1;\n    &:hover { Color: 2 }\n  }\n  @layer inner { #y { Color: 3 } }\n}\n\
+                .z { @layer a { Color: 4 } }\n";
+    let (out, _) = compile(scss, &[]);
+    assert!(priority_of(&out, ".x") > priority_of(&out, "#y"), "a layer's own rules beat its sublayers:\n{out}");
+    assert!(priority_of(&out, ".x:Hover") > priority_of(&out, ".x"), "{out}");
+    assert!(priority_of(&out, ".z") > priority_of(&out, "#y"), "a layer inside a rule is the same layer:\n{out}");
 }
 
 #[test]
@@ -815,12 +765,12 @@ fn repeating_linear_gradient_is_written_out_stop_by_stop() {
     // the pattern written out by hand.
     let (out, stderr) = compile(
         ".stripes { width: 100px; height: 100px; background: repeating-linear-gradient(45deg, #222 0 10%, #444 10% 20%); }",
-        &["--approx", "--color-format", "hex"],
+        &["--approx"],
     );
     let gradient = &out[out.find("\".stripes::UIGradient\"").unwrap()..];
     // Five copies of the two-colour pattern, each ending in a hard stop (two keypoints at one time).
     assert_eq!(gradient[..gradient.find('}').unwrap()].matches("ColorSequenceKeypoint.new(").count(), 20, "{out}");
-    assert!(gradient.contains(r##"ColorSequenceKeypoint.new(0, Color3.fromHex("#222222")), ColorSequenceKeypoint.new(0.1, Color3.fromHex("#222222")), ColorSequenceKeypoint.new(0.1, Color3.fromHex("#444444")), ColorSequenceKeypoint.new(0.2, Color3.fromHex("#444444")), ColorSequenceKeypoint.new(0.2, Color3.fromHex("#222222"))"##), "{out}");
+    assert!(gradient.contains(r##"ColorSequenceKeypoint.new(0, Color3.fromRGB(34, 34, 34)), ColorSequenceKeypoint.new(0.1, Color3.fromRGB(34, 34, 34)), ColorSequenceKeypoint.new(0.1, Color3.fromRGB(68, 68, 68)), ColorSequenceKeypoint.new(0.2, Color3.fromRGB(68, 68, 68)), ColorSequenceKeypoint.new(0.2, Color3.fromRGB(34, 34, 34))"##), "{out}");
     assert!(gradient.contains("Rotation = -45"), "{out}");
     assert!(stderr.is_empty(), "{stderr}");
 
@@ -852,15 +802,13 @@ fn a_repeating_gradient_that_does_not_fit_warns_instead_of_erroring_in_roblox() 
 #[test]
 fn gradient_stop_positions_follow_css() {
     // A first stop past 0 holds its colour back to the start, rather than being dragged to 0.
-    let (out, stderr) =
-        compile(".a { background: linear-gradient(to right, red 50%, blue); }", &["--approx", "--color-format", "hex"]);
-    assert!(out.contains(r##"ColorSequenceKeypoint.new(0, Color3.fromHex("#ff0000")), ColorSequenceKeypoint.new(0.5, Color3.fromHex("#ff0000")), ColorSequenceKeypoint.new(1, Color3.fromHex("#0000ff"))"##), "{out}");
+    let (out, stderr) = compile(".a { background: linear-gradient(to right, red 50%, blue); }", &["--approx"]);
+    assert!(out.contains(r##"ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 0, 0)), ColorSequenceKeypoint.new(0.5, Color3.fromRGB(255, 0, 0)), ColorSequenceKeypoint.new(1, Color3.fromRGB(0, 0, 255))"##), "{out}");
     assert!(stderr.is_empty(), "{stderr}");
 
     // A bare percentage is a colour hint: the two colours are mixed half and half there.
-    let (out, _) =
-        compile(".b { background: linear-gradient(black, 25%, white); }", &["--approx", "--color-format", "hex"]);
-    assert!(out.contains(r##"ColorSequenceKeypoint.new(0.25, Color3.fromHex("#808080"))"##), "{out}");
+    let (out, _) = compile(".b { background: linear-gradient(black, 25%, white); }", &["--approx"]);
+    assert!(out.contains(r##"ColorSequenceKeypoint.new(0.25, Color3.fromRGB(128, 128, 128))"##), "{out}");
 
     // Radial and conic gradients say what's wrong instead of "expected a color".
     let (_, stderr) = compile(".c { background: radial-gradient(red, blue); }", &["--approx"]);
@@ -882,23 +830,23 @@ fn a_gradient_is_painted_over_the_background_colour_like_css() {
     // Opaque stops hide the colour completely, exactly as they do in a browser.
     let (out, stderr) = compile(
         ".plate { background-color: #204060; background-image: linear-gradient(#ffffff, #000000); }",
-        &["--approx", "--color-format", "hex"],
+        &["--approx"],
     );
-    assert!(out.contains(r##"BackgroundColor3 = Color3.fromHex("#ffffff")"##), "{out}");
+    assert!(out.contains(r##"BackgroundColor3 = Color3.fromRGB(255, 255, 255)"##), "{out}");
     assert!(
-        !out.contains(r##"Color3.fromHex("#204060")"##),
+        !out.contains(r##"Color3.fromRGB(32, 64, 96)"##),
         "an opaque gradient hides the colour:
 {out}"
     );
-    assert!(out.contains(r##"ColorSequenceKeypoint.new(0, Color3.fromHex("#ffffff")), ColorSequenceKeypoint.new(1, Color3.fromHex("#000000"))"##), "{out}");
+    assert!(out.contains(r##"ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 255, 255)), ColorSequenceKeypoint.new(1, Color3.fromRGB(0, 0, 0))"##), "{out}");
     assert!(stderr.is_empty(), "{stderr}");
 
     // Translucent stops blend with it instead: 50% red over black is half-brightness red, opaque.
     let (out, _) = compile(
         ".tint { background-color: #000000; background-image: linear-gradient(rgba(255, 0, 0, 0.5), rgba(255, 0, 0, 0.5)); }",
-        &["--approx", "--color-format", "hex"],
+        &["--approx"],
     );
-    assert!(out.contains(r##"ColorSequenceKeypoint.new(0, Color3.fromHex("#800000"))"##), "{out}");
+    assert!(out.contains(r##"ColorSequenceKeypoint.new(0, Color3.fromRGB(128, 0, 0))"##), "{out}");
     assert!(
         !out.contains("Transparency = NumberSequence"),
         "the blend is opaque:
@@ -932,28 +880,17 @@ fn webkit_text_stroke_longhands_and_current_color() {
     // An omitted colour is currentColor, i.e. the rule's own `color`.
     let (out, stderr) = compile(
         ".a { color: #ff0000; -webkit-text-stroke: 2px; }          .b { -webkit-text-stroke-width: 1px; -webkit-text-stroke-color: #00ff00; }          .c { -webkit-text-stroke: 0 #000; }",
-        &["--approx", "--color-format", "hex"],
+        &["--approx"],
     );
     let a = &out[out.find("\".a::UIStroke\"").unwrap()..];
-    assert!(a[..a.find('}').unwrap()].contains(r##"Color = Color3.fromHex("#ff0000")"##), "{out}");
+    assert!(a[..a.find('}').unwrap()].contains(r##"Color = Color3.fromRGB(255, 0, 0)"##), "{out}");
     let b = &out[out.find("\".b::UIStroke\"").unwrap()..];
     let b = &b[..b.find('}').unwrap()];
-    assert!(b.contains("Thickness = 1") && b.contains(r##"Color = Color3.fromHex("#00ff00")"##), "{out}");
+    assert!(b.contains("Thickness = 1") && b.contains(r##"Color = Color3.fromRGB(0, 255, 0)"##), "{out}");
     // A zero width draws nothing, and says so, so it can undo a weaker rule's stroke.
     let c = &out[out.find("\".c::UIStroke\"").unwrap()..];
     assert!(c[..c.find('}').unwrap()].contains("Enabled = false"), "{out}");
     assert!(stderr.is_empty(), "{stderr}");
-}
-
-#[test]
-fn lass_nested_bare_selectors_attach_to_parent() {
-    let dir = TempDir::new("lass-attach");
-    let input = dir.write("x.lass", ".clock\n\tBackgroundTransparency: 0.1\n\t::UIGradient\n\t\tRotation: 90\n.left\n\t.active:Hover\n\t\tE: 1\n\t> .title\n\t\tF: 2\n");
-    let (code, out, stderr) = run(&[input.to_str().unwrap(), "-o", "-"], None);
-    assert_eq!(code, 0, "{stderr}");
-    assert!(out.contains("\".clock::UIGradient\""), "{out}");
-    assert!(out.contains("\".left.active:Hover\""), "{out}");
-    assert!(out.contains("\".left > .title\""), "{out}");
 }
 
 #[test]
@@ -965,15 +902,6 @@ fn star_transition_is_the_default_transition() {
         ),
         "{out}"
     );
-}
-
-#[test]
-fn lass_values_with_luau_tables_pass_through() {
-    let dir = TempDir::new("lass-raw");
-    let input = dir.write("x.lass", ".clock\n\t::UIGradient\n\t\tColor: ColorSequence.new({ColorSequenceKeypoint.new(0, Color3.fromHex(\"#2f1717\")), ColorSequenceKeypoint.new(1, Color3.fromHex(\"#554141\"))})\n.empty\n");
-    let (code, out, stderr) = run(&[input.to_str().unwrap(), "-o", "-"], None);
-    assert_eq!(code, 0, "{stderr}");
-    assert!(out.contains(r##"Color = ColorSequence.new({ColorSequenceKeypoint.new(0, Color3.fromHex("#2f1717")), ColorSequenceKeypoint.new(1, Color3.fromHex("#554141"))}),"##), "{out}");
 }
 
 #[test]
@@ -1084,8 +1012,6 @@ fn rich_text_is_on_by_default_below_every_rule() {
     assert!(wrapped.contains("RichText = true,\n\tTextWrapped = true,"), "{wrapped}");
     assert!(wrapped.contains("TextWrapped = false"), "an author rule must be able to opt out:\n{wrapped}");
     assert!(priority_of(&out, ".plain") > 0.0, "an author rule must override the default:\n{out}");
-    let (out, _) = compile("@priority -5;\n.plain { RichText: false; }", &["--cascade", "none"]);
-    assert!(out.contains("rule(sheet, \"TextLabel, TextButton, TextBox\", -6, {"), "{out}");
 }
 
 #[test]
@@ -1211,7 +1137,7 @@ fn scrolling_frames_size_their_canvas_to_the_content() {
     let ua = &out[out.find("\"ScrollingFrame\"").unwrap()..];
     let ua = &ua[..ua.find('}').unwrap()];
     assert!(ua.contains("AutomaticCanvasSize = Enum.AutomaticSize.XY"), "{out}");
-    assert!(ua.contains("CanvasSize = UDim2.new()"), "{out}");
+    assert!(ua.contains("CanvasSize = UDim2.new(0, 0, 0, 0)"), "{out}");
 
     let list = &out[out.find("\".list\"").unwrap()..];
     let list = &list[..list.find('}').unwrap()];
@@ -1684,4 +1610,78 @@ fn a_growing_item_without_a_width_starts_from_zero() {
     assert!(card.contains("AutomaticSize = Enum.AutomaticSize.Y,"), "{out}");
     assert!(rule_of(&out, ".fixed").contains("Size = UDim2.new(0, 120, 0, 20)"), "{out}");
     assert!(!stderr.contains("only `width`"), "{stderr}");
+}
+
+// ---------- generated code can only build a StyleSheet ----------
+
+#[test]
+fn stylesheet_text_never_becomes_luau_code() {
+    // Each of these once compiled into a call to `require`.
+    for value in [
+        r#"luau("require(1)")"#,
+        "require(2)",
+        r#"unquote("3)) require(3")"#,
+        r"a\29 require\28 4\29",
+        "game.GetService(x)",
+        r#"Enum.Font.#{"x"}#{"(require(5))"}"#,
+    ] {
+        let dir = TempDir::new("no-code");
+        let input = dir.write("in.scss", &format!(".a {{ Text: {value}; }}"));
+        let (_, out, stderr) = run(&[input.to_str().unwrap(), "-o", "-"], None);
+        assert!(!out.contains("require") && !out.contains("GetService"), "{value}:\n{out}\n{stderr}");
+    }
+}
+
+#[test]
+fn allow_raw_luau_lets_luau_through() {
+    let scss = r#".a { Text: luau("game.Players.LocalPlayer.Name"); }"#;
+    let dir = TempDir::new("raw-luau");
+    let input = dir.write("in.scss", scss);
+    let (code, out, stderr) = run(&[input.to_str().unwrap(), "-o", "-"], None);
+    assert_eq!(code, 1, "luau() without --allow-raw-luau is an error:\n{out}");
+    assert!(stderr.contains("error:") && stderr.contains("--allow-raw-luau"), "{stderr}");
+    let (out, _) = compile(scss, &["--allow-raw-luau"]);
+    assert!(out.contains("Text = game.Players.LocalPlayer.Name,"), "{out}");
+}
+
+#[test]
+fn roblox_constructors_become_typed_values() {
+    let (out, stderr) = compile(
+        ".a { Size: UDim2.fromScale(1, 0.5); Position: UDim2.fromOffset(4, 8); BackgroundColor3: Color3.new(1, 0, 0); \
+         FontFace: Font.fromName(\"Gotham\"); Font: Enum.Font.Arial; }",
+        &[],
+    );
+    assert!(out.contains("Size = UDim2.new(1, 0, 0.5, 0),"), "{out}\n{stderr}");
+    assert!(out.contains("Position = UDim2.new(0, 4, 0, 8),"), "{out}");
+    assert!(out.contains("BackgroundColor3 = Color3.fromRGB(255, 0, 0),"), "{out}");
+    assert!(out.contains(r#"FontFace = Font.new("rbxasset://fonts/families/Gotham.json"),"#), "{out}");
+    assert!(out.contains("Font = Enum.Font.Arial,"), "{out}");
+}
+
+#[test]
+fn emit_json_writes_the_typed_stylesheet() {
+    let (out, _) = compile(
+        ":root { --Accent: #ff8000; } .a { Size: UDim2.new(0, 4, 1, -8); BackgroundColor3: var(--Accent); \
+         Text: \"hi\"; Transition: BackgroundColor3 0.2s; }",
+        &["--emit", "json"],
+    );
+    assert!(out.contains(r#""Accent": {"type": "Color3", "r": 255, "g": 128, "b": 0}"#), "{out}");
+    assert!(
+        out.contains(r#""Size": {"type": "UDim2", "x": {"scale": 0, "offset": 4}, "y": {"scale": 1, "offset": -8}}"#),
+        "{out}"
+    );
+    assert!(out.contains(r#""BackgroundColor3": {"type": "token", "name": "Accent"}"#), "{out}");
+    assert!(out.contains(r#""Text": "hi""#), "{out}");
+    let transitions = &out[out.find(r#""transitions""#).expect(&out)..];
+    assert!(transitions.contains(r#""type": "TweenInfo""#) && transitions.contains(r#""time": 0.2,"#), "{out}");
+}
+
+#[test]
+fn emit_json_writes_a_json_file_by_default() {
+    let dir = TempDir::new("emit-json");
+    let input = dir.write("x.scss", ".a { Visible: true; }");
+    let (code, _, stderr) = run(&[input.to_str().unwrap(), "--emit", "json"], None);
+    assert_eq!(code, 0, "{stderr}");
+    let json = std::fs::read_to_string(dir.path().join("x.json")).unwrap();
+    assert!(json.contains(r#""properties": {"Visible": true}"#), "{json}");
 }

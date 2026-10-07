@@ -6,60 +6,30 @@ use std::fmt::Write as _;
 use crate::approx::{self, ApproxOptions, Decl};
 use crate::diag::Diagnostics;
 use crate::eval::{OutRule, Sheet, Token};
-use crate::luau::{self, LuauOptions};
+use crate::luau::{self, Rule};
 use crate::query::Target;
+use crate::roblox::{self, ValueOptions};
 use crate::value::Value;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
-pub enum Cascade {
-    /// The CSS cascade decides which rule wins: `!important` beats normal declarations, then
-    /// `@priority` tiers (like CSS layers; default 0), then specificity, then source order. Every
-    /// rule gets its rank in that order as its StyleRule.Priority.
-    #[default]
-    Css,
-    /// Only explicit `@priority` / `--default-priority` values are emitted (lass behaviour);
-    /// `!important` is ignored.
-    None,
-}
-
 /// A rule's position in the CSS cascade; greater wins.
-#[derive(Clone, Copy, PartialEq, PartialOrd)]
+#[derive(Clone, PartialEq, PartialOrd)]
 struct CascadeKey {
     important: bool,
-    layer: f64,
+    layer: Vec<i64>,
     specificity: (u32, u32, u32),
     order: usize,
 }
 
 pub struct CodegenOptions {
-    pub luau: LuauOptions,
+    pub values: ValueOptions,
     pub approx: ApproxOptions,
-    pub default_priority: Option<f64>,
-    pub cascade: Cascade,
     /// `StyleSheet.Name`; also used in the header comment.
     pub sheet_name: String,
     /// Source description for the header comment; `None` omits the header.
     pub header: Option<String>,
 }
 
-/// A Roblox-level StyleRule.
-#[derive(Debug, Default)]
-pub struct RobloxRule {
-    pub selector: String,
-    pub priority: Option<f64>,
-    pub props: Vec<(String, String)>,
-    pub attributes: Vec<(String, String)>,
-    pub transitions: Vec<(String, String)>,
-    pub children: Vec<RobloxRule>,
-}
-
-impl RobloxRule {
-    fn is_empty(&self) -> bool {
-        self.props.is_empty() && self.attributes.is_empty() && self.transitions.is_empty() && self.children.is_empty()
-    }
-}
-
-fn set(list: &mut Vec<(String, String)>, key: String, value: String) {
+fn set<T>(list: &mut Vec<(String, T)>, key: String, value: T) {
     match list.iter_mut().find(|(k, _)| *k == key) {
         Some(entry) => entry.1 = value,
         None => list.push((key, value)),
@@ -75,18 +45,22 @@ pub fn is_css_property(name: &str) -> bool {
     }
 }
 
-fn attributes(tokens: &[Token], opts: &LuauOptions, diag: &mut Diagnostics) -> Vec<(String, String)> {
+fn attributes(tokens: &[Token], opts: &ValueOptions, diag: &mut Diagnostics) -> Vec<(String, luau::Value)> {
     let mut out = Vec::new();
     for token in tokens {
-        let name = luau::attribute_name(&token.name);
+        let name = roblox::attribute_name(&token.name);
         if name != token.name {
             diag.warn(
                 format!("token \"--{}\" becomes attribute \"{name}\" (attribute names may only contain letters, digits and _)", token.name),
                 Some(&token.span),
             );
         }
-        match luau::value(&token_value(&token.value, &token.name, diag, &token.span), opts) {
+        let value = token_value(&token.value, &token.name, diag, &token.span);
+        match roblox::value(&value, opts) {
             Ok(v) => set(&mut out, name, v),
+            Err(e) if roblox::uses_raw_luau(&value) => {
+                diag.error(format!("token --{}: {e}", token.name), Some(&token.span))
+            }
             Err(e) => diag.warn(format!("token --{}: {e} (ignored)", token.name), Some(&token.span)),
         }
     }
@@ -313,12 +287,7 @@ fn to_decl(d: &crate::eval::OutDecl) -> Decl {
 /// below every author rule: an item's own `flex`/`flex-grow`/`flex-shrink` override it property by
 /// property, and so keep the shrink unless they set one. A rule that turns a weaker rule's row
 /// into something else turns the shrink back off.
-fn flex_shrink_defaults(
-    sheet: &Sheet,
-    priorities: &HashMap<(usize, bool), Option<f64>>,
-    cascade: Cascade,
-    lowest: f64,
-) -> Vec<RobloxRule> {
+fn flex_shrink_defaults(sheet: &Sheet, priorities: &HashMap<(usize, bool), Option<f64>>) -> Vec<Rule> {
     const NAMES: &[&str] = &["display", "flex-direction", "overflow", "overflow-x", "overflow-y"];
     let top = priorities.values().filter_map(|p| *p).fold(0.0, f64::max);
     let mut out = Vec::new();
@@ -331,25 +300,21 @@ fn flex_shrink_defaults(
         all.extend(rule.decls.iter().filter(|d| NAMES.contains(&d.name.as_str())).map(to_decl));
         let props = if approx::shrinks_items(&all) {
             vec![
-                ("FlexMode".to_string(), "Enum.UIFlexMode.Shrink".to_string()),
-                ("ShrinkRatio".to_string(), "1".to_string()),
+                ("FlexMode".to_string(), luau::Value::enum_item("UIFlexMode", "Shrink")),
+                ("ShrinkRatio".to_string(), luau::Value::Number(1.0)),
             ]
         } else if approx::shrinks_items(&weaker) {
             vec![
-                ("FlexMode".to_string(), "Enum.UIFlexMode.None".to_string()),
-                ("ShrinkRatio".to_string(), "0".to_string()),
+                ("FlexMode".to_string(), luau::Value::enum_item("UIFlexMode", "None")),
+                ("ShrinkRatio".to_string(), luau::Value::Number(0.0)),
             ]
         } else {
             continue;
         };
-        // Under the CSS cascade author rules are ranked from 1 up, and the user-agent defaults sit
-        // at 0 (none of them touch a UIFlexItem): these take the same order below 0.
-        let priority = match cascade {
-            Cascade::Css => {
-                priorities.get(&(idx, false)).or(priorities.get(&(idx, true))).copied().flatten().map(|p| p - top - 1.0)
-            }
-            Cascade::None => Some(lowest),
-        };
+        // Author rules are ranked from 1 up, and the user-agent defaults sit at 0 (none of them
+        // touch a UIFlexItem): these take the same order below 0.
+        let priority =
+            priorities.get(&(idx, false)).or(priorities.get(&(idx, true))).copied().flatten().map(|p| p - top - 1.0);
         let selector = split_selector_list(&rule.selector.to_roblox(&mut Diagnostics::default(), None))
             .iter()
             .map(|s| format!("{s} > GuiObject::UIFlexItem"))
@@ -364,7 +329,7 @@ fn flex_shrink_defaults(
                 Some(name) => prefix_selector(&selector, &format!("@{name} ")),
                 None => selector.clone(),
             };
-            out.push(RobloxRule { selector, priority, props: props.clone(), ..Default::default() });
+            out.push(Rule { selector, priority, props: props.clone(), ..Default::default() });
         }
     }
     out
@@ -421,13 +386,13 @@ fn check_block_children_without_width(sheet: &Sheet, diag: &mut Diagnostics) {
 }
 
 /// Converts evaluated rules into the Roblox StyleRule tree.
-pub fn lower(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -> (Vec<(String, String)>, Vec<RobloxRule>) {
-    let sheet_attributes = attributes(&sheet.tokens, &opts.luau, diag);
+pub fn lower(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -> luau::Sheet {
+    let sheet_attributes = attributes(&sheet.tokens, &opts.values, diag);
 
-    let mut rules: Vec<RobloxRule> = Vec::new();
+    let mut rules: Vec<Rule> = Vec::new();
     let hides_anything = sheet.rules.iter().any(|r| r.decls.iter().any(hides));
-    let parts = cascade_parts(sheet, opts, diag);
-    let priorities = cascade_priorities(sheet, &parts, opts);
+    let parts = cascade_parts(sheet);
+    let priorities = cascade_priorities(sheet, &parts);
     let tokens = inline_tokens(sheet);
     if opts.approx.strict && opts.approx.groups.contains(&approx::Group::Size) {
         check_percentages_under_content(sheet, diag);
@@ -462,7 +427,7 @@ pub fn lower(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -> (V
                         Some(name) => prefix_selector(&r.selector, &format!("@{name} ")),
                         None => r.selector.clone(),
                     };
-                    rules.push(RobloxRule {
+                    rules.push(Rule {
                         selector,
                         priority: r.priority,
                         props: r.props.clone(),
@@ -480,12 +445,9 @@ pub fn lower(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -> (V
 
     // The user-agent stylesheet: defaults below every author rule, like a browser's. Any rule that
     // sets the same property overrides them (e.g. `RichText: false`).
-    let lowest = match opts.cascade {
-        Cascade::Css => 0.0,
-        Cascade::None => lowest_priority(&rules).min(0.0) - 1.0,
-    };
+    let lowest = 0.0;
     if opts.approx.groups.contains(&approx::Group::Layout) {
-        rules.splice(0..0, flex_shrink_defaults(sheet, &priorities, opts.cascade, lowest));
+        rules.splice(0..0, flex_shrink_defaults(sheet, &priorities));
     }
     // A fresh GuiObject is 0x0, where a CSS box with no size given takes one from its content.
     // AutomaticSize is a floor rather than a replacement — it never shrinks an element below its
@@ -493,20 +455,20 @@ pub fn lower(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -> (V
     // AutomaticSize, so a rule that sizes an element switches this straight back off.
     let mut gui_defaults = Vec::new();
     if opts.approx.groups.contains(&approx::Group::Size) {
-        gui_defaults.push(("AutomaticSize".to_string(), "Enum.AutomaticSize.XY".to_string()));
+        gui_defaults.push(("AutomaticSize".to_string(), luau::Value::enum_item("AutomaticSize", "XY")));
     }
     // A CSS box has no background and no border unless given one; a fresh GuiObject has an opaque
     // grey background and a 1px legacy border. Any rule with a background sets
     // BackgroundTransparency itself (see the transparency cascade), and any border clears
     // BorderSizePixel, so these only fill in what CSS leaves unset.
     if opts.approx.groups.contains(&approx::Group::Color) {
-        gui_defaults.push(("BackgroundTransparency".to_string(), "1".to_string()));
-        gui_defaults.push(("BorderSizePixel".to_string(), "0".to_string()));
+        gui_defaults.push(("BackgroundTransparency".to_string(), luau::Value::Number(1.0)));
+        gui_defaults.push(("BorderSizePixel".to_string(), luau::Value::Number(0.0)));
     }
     if !gui_defaults.is_empty() {
         rules.insert(
             0,
-            RobloxRule {
+            Rule {
                 selector: GUI_OBJECT_CLASSES.join(", "),
                 priority: Some(lowest),
                 props: gui_defaults,
@@ -519,10 +481,10 @@ pub fn lower(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -> (V
     if opts.approx.groups.contains(&approx::Group::Color) {
         rules.insert(
             0,
-            RobloxRule {
+            Rule {
                 selector: "TextButton, ImageButton".to_string(),
                 priority: Some(lowest),
-                props: vec![("AutoButtonColor".to_string(), "false".to_string())],
+                props: vec![("AutoButtonColor".to_string(), luau::Value::Bool(false))],
                 ..Default::default()
             },
         );
@@ -533,26 +495,26 @@ pub fn lower(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -> (V
     if opts.approx.groups.contains(&approx::Group::Visibility) {
         rules.insert(
             0,
-            RobloxRule {
+            Rule {
                 selector: "ScrollingFrame".to_string(),
                 priority: Some(lowest),
                 props: vec![
-                    ("AutomaticCanvasSize".to_string(), "Enum.AutomaticSize.XY".to_string()),
-                    ("CanvasSize".to_string(), "UDim2.new()".to_string()),
+                    ("AutomaticCanvasSize".to_string(), luau::Value::enum_item("AutomaticSize", "XY")),
+                    ("CanvasSize".to_string(), luau::Value::udim2(0.0, 0.0, 0.0, 0.0)),
                 ],
                 ..Default::default()
             },
         );
     }
-    let mut text_defaults = vec![("RichText".to_string(), "true".to_string())];
+    let mut text_defaults = vec![("RichText".to_string(), luau::Value::Bool(true))];
     // CSS text wraps unless `white-space: nowrap` says otherwise; Roblox text runs off the edge
     // unless TextWrapped says otherwise.
     if opts.approx.groups.contains(&approx::Group::Text) {
-        text_defaults.push(("TextWrapped".to_string(), "true".to_string()));
+        text_defaults.push(("TextWrapped".to_string(), luau::Value::Bool(true)));
     }
     rules.insert(
         0,
-        RobloxRule {
+        Rule {
             selector: "TextLabel, TextButton, TextBox".to_string(),
             priority: Some(lowest),
             props: text_defaults,
@@ -564,18 +526,18 @@ pub fn lower(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -> (V
     if opts.approx.groups.contains(&approx::Group::Text) {
         rules.insert(
             1,
-            RobloxRule {
+            Rule {
                 selector: "TextLabel, TextBox".to_string(),
                 priority: Some(lowest),
                 props: vec![
-                    ("TextXAlignment".to_string(), "Enum.TextXAlignment.Left".to_string()),
-                    ("TextYAlignment".to_string(), "Enum.TextYAlignment.Top".to_string()),
+                    ("TextXAlignment".to_string(), luau::Value::enum_item("TextXAlignment", "Left")),
+                    ("TextYAlignment".to_string(), luau::Value::enum_item("TextYAlignment", "Top")),
                 ],
                 ..Default::default()
             },
         );
     }
-    (sheet_attributes, rules)
+    luau::Sheet { name: opts.sheet_name.clone(), attributes: sheet_attributes, rules }
 }
 
 /// The GuiObject classes a stylesheet can select, used for the user-agent defaults. Every one of
@@ -645,7 +607,7 @@ fn container_names(rule: &OutRule) -> Option<Vec<String>> {
 
 /// One `<element>::StyleQuery #Name { conditions }` rule per custom query: on the ScreenGui for
 /// @media, on each matching container for @container.
-fn query_definitions(sheet: &Sheet, diag: &mut Diagnostics) -> Vec<RobloxRule> {
+fn query_definitions(sheet: &Sheet, diag: &mut Diagnostics) -> Vec<Rule> {
     let mut seen: Vec<String> = Vec::new();
     let mut out = Vec::new();
     for rule in sheet.rules.iter().filter(|r| r.query) {
@@ -685,20 +647,15 @@ fn query_definitions(sheet: &Sheet, diag: &mut Diagnostics) -> Vec<RobloxRule> {
                 continue;
             }
             let selector = hosts.iter().map(|h| format!("{h}::StyleQuery #{name}")).collect::<Vec<_>>().join(", ");
-            out.push(RobloxRule { selector, props: q.conditions(), ..Default::default() });
+            out.push(Rule { selector, props: q.conditions(), ..Default::default() });
         }
     }
     out
 }
 
-fn lowest_priority(rules: &[RobloxRule]) -> f64 {
-    rules.iter().map(|r| r.priority.unwrap_or(0.0).min(lowest_priority(&r.children))).fold(f64::INFINITY, f64::min)
-}
-
 /// Splits each rule into the parts that take part in the cascade: its normal declarations (with
-/// its tokens) and, under the CSS cascade, its `!important` declarations as a separate part.
-fn cascade_parts(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -> Vec<Vec<(OutRule, bool)>> {
-    let mut warned = false;
+/// its tokens) and its `!important` declarations as a separate part.
+fn cascade_parts(sheet: &Sheet) -> Vec<Vec<(OutRule, bool)>> {
     sheet
         .rules
         .iter()
@@ -706,13 +663,7 @@ fn cascade_parts(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -
             if rule.query || rule.selector.0.is_empty() || (rule.decls.is_empty() && rule.tokens.is_empty()) {
                 return Vec::new();
             }
-            let has_important = rule.decls.iter().any(|d| d.important);
-            if opts.cascade == Cascade::None || !has_important {
-                if has_important && !warned {
-                    let span = rule.decls.iter().find(|d| d.important).map(|d| d.span.clone());
-                    diag.warn("!important needs the CSS cascade (--cascade css) and is ignored", span.as_ref());
-                    warned = true;
-                }
+            if !rule.decls.iter().any(|d| d.important) {
                 return vec![(rule.clone(), false)];
             }
             let mut normal = rule.clone();
@@ -730,21 +681,9 @@ fn cascade_parts(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -
         .collect()
 }
 
-/// StyleRule.Priority for each (rule index, important) part. Under the CSS cascade every part gets
-/// its rank (1, 2, ...) in cascade order, so the rule CSS would apply always has the higher priority.
-fn cascade_priorities(
-    sheet: &Sheet,
-    parts: &[Vec<(OutRule, bool)>],
-    opts: &CodegenOptions,
-) -> HashMap<(usize, bool), Option<f64>> {
-    let layer_of = |rule: &OutRule| rule.priority.or(opts.default_priority);
-    if opts.cascade == Cascade::None {
-        return parts
-            .iter()
-            .enumerate()
-            .flat_map(|(idx, p)| p.iter().map(move |(rule, important)| ((idx, *important), layer_of(rule))))
-            .collect();
-    }
+/// StyleRule.Priority for each (rule index, important) part: its rank (1, 2, ...) in cascade order,
+/// so the rule CSS would apply always has the higher priority.
+fn cascade_priorities(sheet: &Sheet, parts: &[Vec<(OutRule, bool)>]) -> HashMap<(usize, bool), Option<f64>> {
     let mut keys: Vec<((usize, bool), CascadeKey)> = parts
         .iter()
         .enumerate()
@@ -752,7 +691,7 @@ fn cascade_priorities(
             p.iter().map(move |(rule, important)| {
                 let key = CascadeKey {
                     important: *important,
-                    layer: layer_of(rule).unwrap_or(0.0),
+                    layer: layer_key(sheet, &rule.layer, *important),
                     specificity: sheet.rules[idx].selector.specificity(),
                     order: idx,
                 };
@@ -762,6 +701,23 @@ fn cascade_priorities(
         .collect();
     keys.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
     keys.into_iter().enumerate().map(|(rank, (id, _))| (id, Some(rank as f64 + 1.0))).collect()
+}
+
+/// Where a rule's `@layer` sits in the cascade, compared level by level: each level ranks its
+/// layers in the order they were first named, and the level's own rules (outside any of those
+/// layers) after all of them, as in CSS. `!important` declarations reverse that order.
+fn layer_key(sheet: &Sheet, layer: &[String], important: bool) -> Vec<i64> {
+    let mut key: Vec<i64> = (1..=layer.len())
+        .map(|n| {
+            let siblings = sheet.layers.iter().filter(|l| l.len() == n && l[..n - 1] == layer[..n - 1]);
+            siblings.into_iter().position(|l| l[..] == layer[..n]).unwrap_or(0) as i64
+        })
+        .collect();
+    key.push(i64::MAX);
+    if important {
+        key.iter_mut().for_each(|k| *k = -*k);
+    }
+    key
 }
 
 /// Whether a declaration can make an element invisible.
@@ -778,29 +734,29 @@ fn hides(decl: &crate::eval::OutDecl) -> bool {
 /// `display: flex` (or `visibility: visible`) sets `Visible = true`, which only matters for undoing
 /// another rule's `display: none`. With nothing in the sheet hiding elements, it would only fight
 /// scripts that set `Visible`, so it's dropped. Explicit `Visible: true` declarations are kept.
-fn drop_generated_visible(rule: &OutRule, lowered: &mut Vec<RobloxRule>) {
+fn drop_generated_visible(rule: &OutRule, lowered: &mut Vec<Rule>) {
     if rule.decls.iter().any(|d| d.name == "Visible") {
         return;
     }
     for r in lowered.iter_mut().filter(|r| !r.selector.contains("::")) {
-        r.props.retain(|(k, v)| !(k == "Visible" && v == "true"));
+        r.props.retain(|(k, v)| !(k == "Visible" && *v == luau::Value::Bool(true)));
     }
     lowered.retain(|r| !r.is_empty());
 }
 
 /// `border: none` disables the element's `::UIStroke`, which creates a (disabled) UIStroke on every
 /// matched element. That only matters if some rule turns a stroke on; otherwise drop those rules.
-fn drop_unneeded_stroke_resets(rules: &mut Vec<RobloxRule>) {
-    fn is_stroke_reset(rule: &RobloxRule) -> bool {
+fn drop_unneeded_stroke_resets(rules: &mut Vec<Rule>) {
+    fn is_stroke_reset(rule: &Rule) -> bool {
         rule.selector.contains("::UIStroke")
             && rule.transitions.is_empty()
             && rule.children.is_empty()
-            && rule.props.iter().all(|(k, v)| k == "Enabled" && v == "false")
+            && rule.props.iter().all(|(k, v)| k == "Enabled" && *v == luau::Value::Bool(false))
     }
-    fn any_real_stroke(rules: &[RobloxRule]) -> bool {
+    fn any_real_stroke(rules: &[Rule]) -> bool {
         rules.iter().any(|r| (r.selector.contains("::UIStroke") && !is_stroke_reset(r)) || any_real_stroke(&r.children))
     }
-    fn remove(rules: &mut Vec<RobloxRule>) {
+    fn remove(rules: &mut Vec<Rule>) {
         rules.retain(|r| !is_stroke_reset(r));
         for r in rules {
             remove(&mut r.children);
@@ -939,10 +895,12 @@ fn inherited_decls(sheet: &Sheet, index: usize) -> Vec<Decl> {
 
 /// Keeps only the properties (and pseudo-instance properties and transitions) that `keys` has.
 fn restrict_to(mut full: approx::Translated, keys: &approx::Translated) -> approx::Translated {
-    let has = |list: &[(String, String)], key: &str| list.iter().any(|(k, _)| k == key);
-    let pseudo_has = |list: &[(String, Vec<(String, String)>)], class: &str, key: &str| {
+    fn has<T>(list: &[(String, T)], key: &str) -> bool {
+        list.iter().any(|(k, _)| k == key)
+    }
+    fn pseudo_has<T>(list: &[(String, Vec<(String, T)>)], class: &str, key: &str) -> bool {
         list.iter().any(|(c, props)| c == class && has(props, key))
-    };
+    }
     full.props.retain(|(k, _)| has(&keys.props, k));
     full.transitions.retain(|(k, _)| has(&keys.transitions, k));
     for (class, props) in &mut full.pseudo {
@@ -956,6 +914,9 @@ fn restrict_to(mut full: approx::Translated, keys: &approx::Translated) -> appro
     full
 }
 
+/// Marks a property in `own_only`, which only records which properties a rule produces.
+const PLACEHOLDER: luau::Value = luau::Value::Bool(false);
+
 fn lower_rule(
     rule: &OutRule,
     inherited: &[Decl],
@@ -964,16 +925,16 @@ fn lower_rule(
     priority: Option<f64>,
     opts: &CodegenOptions,
     diag: &mut Diagnostics,
-) -> Vec<RobloxRule> {
-    let mut main = RobloxRule { selector, priority, ..Default::default() };
-    main.attributes = attributes(&rule.tokens, &opts.luau, diag);
+) -> Vec<Rule> {
+    let mut main = Rule { selector, priority, ..Default::default() };
+    main.attributes = attributes(&rule.tokens, &opts.values, diag);
 
     let mut css: Vec<Decl> = inherited
         .iter()
         .map(|d| Decl { name: d.name.clone(), value: inline_vars(&d.value, tokens), span: d.span.clone() })
         .collect();
-    let mut explicit: Vec<(String, String)> = Vec::new();
-    let mut explicit_transitions: Vec<(String, String)> = Vec::new();
+    let mut explicit: Vec<(String, luau::Value)> = Vec::new();
+    let mut explicit_transitions: Vec<(String, luau::TweenInfo)> = Vec::new();
     for decl in &rule.decls {
         if CONTAINER_PROPERTIES.contains(&decl.name.as_str()) {
             // Marks the element as a query container; see query_definitions.
@@ -1002,8 +963,11 @@ fn lower_rule(
                         Some(&decl.span),
                     );
             }
-            match luau::value(&decl.value, &opts.luau) {
+            match roblox::value(&decl.value, &opts.values) {
                 Ok(v) => set(&mut explicit, decl.name.clone(), v),
+                Err(e) if roblox::uses_raw_luau(&decl.value) => {
+                    diag.error(format!("{}: {e}", decl.name), Some(&decl.span))
+                }
                 Err(e) => diag.warn(format!("{}: {e} (ignored)", decl.name), Some(&decl.span)),
             }
         }
@@ -1029,30 +993,30 @@ fn lower_rule(
         // `.a:hover { opacity: 0.5 }` fades `.a`'s background and border.
         if own.iter().any(|d| d.name == "opacity") {
             for prop in approx::css_property_targets("opacity") {
-                own_only.set_prop(prop, String::new());
+                own_only.set_prop(prop, PLACEHOLDER);
             }
             for (class, prop) in approx::css_pseudo_targets("opacity") {
-                own_only.set_pseudo_prop(class, prop, String::new());
+                own_only.set_pseudo_prop(class, prop, PLACEHOLDER);
             }
         }
         // TextSize depends on the family as well as the size, and LineHeight and the half-leading
         // padding on all three and the line-height: `.mono { font-family: ... }` resizes the text.
         if own.iter().any(|d| matches!(d.name.as_str(), "font" | "font-family" | "font-size" | "line-height")) {
-            own_only.set_prop("TextSize", String::new());
-            own_only.set_prop("LineHeight", String::new());
-            own_only.set_pseudo_prop("UIPadding", "PaddingTop", String::new());
-            own_only.set_pseudo_prop("UIPadding", "PaddingBottom", String::new());
+            own_only.set_prop("TextSize", PLACEHOLDER);
+            own_only.set_prop("LineHeight", PLACEHOLDER);
+            own_only.set_pseudo_prop("UIPadding", "PaddingTop", PLACEHOLDER);
+            own_only.set_pseudo_prop("UIPadding", "PaddingBottom", PLACEHOLDER);
         }
         // Scrolling lifts the cap that keeps a sized element out of a flex line's stretch:
         // `.log.scrolls { overflow-y: auto }` needs its canvas to outgrow `.log`'s height.
         if own.iter().any(|d| d.name.starts_with("overflow")) {
-            own_only.set_pseudo_prop("UISizeConstraint", "MaxSize", String::new());
+            own_only.set_pseudo_prop("UISizeConstraint", "MaxSize", PLACEHOLDER);
         }
         // The border's inset is part of every side's padding: `.card.flat { border: none }` gives
         // the room back.
         if own.iter().any(|d| matches!(d.name.as_str(), "border" | "border-width" | "border-style")) {
             for side in ["PaddingTop", "PaddingRight", "PaddingBottom", "PaddingLeft"] {
-                own_only.set_pseudo_prop("UIPadding", side, String::new());
+                own_only.set_pseudo_prop("UIPadding", side, PLACEHOLDER);
             }
         }
         restrict_to(approx::translate(&css, &opts.approx, diag), &own_only)
@@ -1079,7 +1043,7 @@ fn lower_rule(
             pseudo.push((class.clone(), Vec::new()));
         }
     }
-    let pseudo_rules: Vec<RobloxRule> = pseudo
+    let pseudo_rules: Vec<Rule> = pseudo
         .into_iter()
         .map(|(class, props)| {
             let transitions = translated
@@ -1088,7 +1052,7 @@ fn lower_rule(
                 .find(|(c, _)| *c == class)
                 .map(|(_, t)| t.clone())
                 .unwrap_or_default();
-            RobloxRule {
+            Rule {
                 selector: rule.selector.with_pseudo_instance(&class).to_roblox(&mut Diagnostics::default(), None),
                 priority,
                 props,
@@ -1105,87 +1069,25 @@ fn lower_rule(
 }
 
 pub fn emit_luau(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -> String {
-    let (sheet_attributes, rules) = lower(sheet, opts, diag);
-    let mut out = String::new();
-    if let Some(source) = &opts.header {
-        let _ =
-            writeln!(out, "-- Generated by outlass {} from {source}. Do not edit by hand.", env!("CARGO_PKG_VERSION"));
-        out.push('\n');
+    let lowered = lower(sheet, opts, diag);
+    let emit_options = luau::EmitOptions {
+        header: opts.header.as_ref().map(|source| {
+            format!("Generated by outlass {} from {source}. Do not edit by hand.", env!("CARGO_PKG_VERSION"))
+        }),
+        allow_raw_luau: opts.values.allow_raw_luau,
+    };
+    match luau::emit(&lowered, &emit_options) {
+        Ok(code) => code,
+        Err(e) => {
+            diag.error(format!("can't emit Luau: {e}"), None);
+            String::new()
+        }
     }
-    out.push_str("local sheet = Instance.new(\"StyleSheet\")\n");
-    let _ = writeln!(out, "sheet.Name = {}", luau::string(&opts.sheet_name));
-    for (name, value) in &sheet_attributes {
-        let _ = writeln!(out, "sheet:SetAttribute({}, {value})", luau::string(name));
-    }
-    if !rules.is_empty() {
-        out.push_str(
-            "\nlocal function rule(parent: Instance, selector: string, priority: number?, properties: { [string]: any }?): StyleRule\n\
-             \tlocal r = Instance.new(\"StyleRule\")\n\
-             \tr.Name = selector\n\
-             \tr.Selector = selector\n\
-             \tif priority then\n\
-             \t\tr.Priority = priority\n\
-             \tend\n\
-             \tif properties then\n\
-             \t\tr:SetProperties(properties)\n\
-             \tend\n\
-             \tr.Parent = parent\n\
-             \treturn r\n\
-             end\n",
-        );
-    }
-    for rule in &rules {
-        out.push('\n');
-        emit_rule(&mut out, rule, "sheet", 0);
-    }
-    out.push_str("\nreturn sheet\n");
-    out
 }
 
-fn emit_rule(out: &mut String, rule: &RobloxRule, parent: &str, depth: usize) {
-    let indent = "\t".repeat(depth);
-    let priority = rule.priority.map(luau::number).unwrap_or_else(|| "nil".into());
-    let props = if rule.props.is_empty() {
-        "nil".to_string()
-    } else {
-        let mut s = String::from("{\n");
-        for (k, v) in &rule.props {
-            let _ = writeln!(s, "{indent}\t{} = {v},", luau::table_key(k));
-        }
-        s.push_str(&indent);
-        s.push('}');
-        s
-    };
-    let call = format!("rule({parent}, {}, {priority}, {props})", luau::string(&rule.selector));
-    let needs_handle = !rule.attributes.is_empty() || !rule.transitions.is_empty() || !rule.children.is_empty();
-    if !needs_handle {
-        let _ = writeln!(out, "{indent}{call}");
-        return;
-    }
-    let var = format!("r{}", depth + 1);
-    let inner = "\t".repeat(depth + 1);
-    let _ = writeln!(out, "{indent}do");
-    // Re-indent the property table for the extra `do` level.
-    let call = call.replace(&format!("\n{indent}"), &format!("\n{inner}"));
-    let _ = writeln!(out, "{inner}local {var} = {call}");
-    for (name, value) in &rule.attributes {
-        let _ = writeln!(out, "{inner}{var}:SetAttribute({}, {value})", luau::string(name));
-    }
-    let (defaults, specific): (Vec<_>, Vec<_>) = rule.transitions.iter().partition(|(k, _)| k == "*");
-    if !specific.is_empty() {
-        let _ = writeln!(out, "{inner}{var}:SetPropertyTransitions({{");
-        for (k, v) in specific {
-            let _ = writeln!(out, "{inner}\t{} = {v},", luau::table_key(k));
-        }
-        let _ = writeln!(out, "{inner}}})");
-    }
-    if let Some((_, v)) = defaults.last() {
-        let _ = writeln!(out, "{inner}{var}:SetDefaultPropertyTransition({v})");
-    }
-    for child in &rule.children {
-        emit_rule(out, child, &var, depth + 1);
-    }
-    let _ = writeln!(out, "{indent}end");
+/// The lowered stylesheet as JSON (see `luau::to_json`).
+pub fn emit_json(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -> String {
+    luau::to_json(&lower(sheet, opts, diag))
 }
 
 /// Debug output: the evaluated stylesheet as flat CSS (before Roblox lowering).

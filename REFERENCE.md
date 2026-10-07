@@ -1,6 +1,6 @@
 # outlass reference
 
-Compiles **SCSS** (plus indented **.sass** and legacy **.lass**) into a Luau module that builds and returns a Roblox
+Compiles **SCSS** (plus indented **.sass**) into a Luau module that builds and returns a Roblox
 [`StyleSheet`](https://create.roblox.com/docs/reference/engine/classes/StyleSheet). It's the successor to
 [lass](https://github.com/toodols/lass): a real SCSS front end with modules, mixins, functions, and control
 flow, plus optional translation of CSS properties Roblox doesn't have.
@@ -61,17 +61,28 @@ Put it in a ModuleScript and apply it with a `StyleLink` under your `ScreenGui`.
 | `a b` (descendant) | `a >> b` |
 | `:hover` / `:active` / `:disabled` | `:Hover` / `:Press` / `:NonInteractable` |
 | nesting, `&`, `&-suffix`, `@extend` | flattened into full selectors, like Sass does |
-| `PascalCase: value` | Roblox property; the value is emitted as Luau |
+| `PascalCase: value` | Roblox property, set to the value below |
 | `--Name: value` | `SetAttribute` on the rule (or on the sheet in `:root`/top level); raw text, so use `#{}` |
 | `var(--Name)`, `token(Name)` | token reference `"$Name"`; in a CSS property, a `:root` token that isn't a colour is compiled in (see below) |
-| the CSS cascade, `!important`, `@priority 10;` | `StyleRule.Priority` (see [The cascade](#the-cascade)) |
+| the CSS cascade, `!important`, `@layer` | `StyleRule.Priority` (see [The cascade](#the-cascade)) |
 | `Transition: BackgroundColor3 0.2s Quad Out` | `SetPropertyTransitions` (`*`/`all` → `SetDefaultPropertyTransition`) |
 | `@media`, `@container`, `@PreferredInputTouch { ... }` | `@Name` query selectors (see [Queries](#queries)) |
 
-**Values**: `10px` → `10`, `50%` → `0.5`, `500ms` → `0.5`, `90deg`/`0.25turn` → degrees, `1rem` → `16`
-(`--rem`), colors → `Color3.fromRGB` (`--color-format`), `"text"` → string, `[1, 2]` → `{1, 2}`,
-maps → tables. Unquoted identifiers and unknown calls pass through as Luau, so `Enum.Font.Gotham`,
-`UDim2.new(0, 4, 1, -8)` and `Font.new "rbxasset://..."` work as written. `luau("...")` inserts any raw Luau.
+**Values**: `10px` → `10`, `50%` → `0.5`, `500ms` → `0.5`, `90deg`/`0.25turn` → degrees, `1rem` → `16`,
+colors → `Color3.fromRGB`, `"text"` → string, `true`/`false`, `math.huge`, and
+`Enum.Font.Gotham`-style Enum items. These Roblox constructors are understood, with their arguments converted
+the same way: `UDim.new`, `UDim2.new`/`fromScale`/`fromOffset`, `Vector2.new`, `Rect.new`, `NumberRange.new`,
+`Color3.new`/`fromRGB`/`fromHex`/`fromHSV`, `ColorSequence.new`, `NumberSequence.new` (keypoint lists in
+`[...]`), and `Font.new`/`fromName`/`fromId`/`fromEnum` (also `Font.new "rbxasset://..."`).
+
+Anything else (another call, or a bare word that isn't an Enum item) is ignored with a warning, so a
+stylesheet can't put code into the generated module: it can only build a StyleSheet. `luau("...")` inserts
+raw Luau, but only with `--allow-raw-luau`; use it only for stylesheets you trust.
+
+`--emit json` writes the compiled StyleSheet as JSON instead: the rules, their attributes and transitions,
+and every value typed (`{"type": "UDim2", "x": {"scale": 0, "offset": 4}, ...}`, `{"type": "Enum", "enum":
+"Font", "item": "Gotham"}`, `{"type": "token", "name": "Accent"}`; infinity is `"inf"`). The Luau is
+generated from exactly this, by one module (`src/luau.rs`) that escapes every string and checks every name.
 
 ## The cascade
 
@@ -80,14 +91,15 @@ encodes that as the priority. Every rule is ranked, and its rank (1, 2, 3, ...) 
 
 1. `!important` declarations beat normal ones. A rule that has both is split into a normal StyleRule and
    an important one.
-2. `@priority <n>;` puts a rule in tier `n` (default 0, or `--default-priority`), like a CSS cascade layer.
-   A higher tier wins regardless of specificity. It applies to the rule it's in, or to the rule right after
-   it, and nested rules inherit their parent's tier.
+2. `@layer` works as in CSS. Layers rank in the order they're first named (`@layer reset, base, theme;`
+   fixes it up front), a later layer wins regardless of specificity, and styles outside any layer beat
+   every layer. Layers nest (`@layer theme { @layer dark { ... } }`, or `theme.dark`), and a layer's own
+   rules beat its sublayers. For `!important` declarations the layer order is reversed, as in CSS.
 3. The more specific selector wins: ids, then classes/states/attributes, then types.
 4. The later rule wins.
 
-So `.button:hover` beats `.button`, which beats `TextButton`, without any manual priorities.
-`--cascade none` switches this off and emits only explicit `@priority` values, which is how lass worked.
+So `.button:hover` beats `.button`, which beats `TextButton`, without any manual priorities. The numbers
+themselves are internal: adding a rule renumbers the rest, so rely on the order, not on a value.
 
 Like a browser, outlass also has a tiny user-agent stylesheet that sits below every author rule. For
 `TextLabel`, `TextButton` and `TextBox` it turns `RichText` on, since CSS text is always markup. With
@@ -108,6 +120,51 @@ colour is compiled in too): a font family, a length or a gradient has to be know
 outlass compiles it into a `FontFace`, a `UDim` or a `UIGradient`. So `var(--font-body)` or
 `var(--radius)` gets the token's `:root` value compiled in, unless a rule or query redefines the token.
 The attribute is still set, as text when it has no attribute type (a gradient).
+
+### A fade from code ends invisible
+
+A fade-in tweened from Luau, such as `TweenService:Create(frame, info, { BackgroundTransparency = 0 })`,
+plays and then the background disappears as the tween ends. In the Properties window
+`BackgroundTransparency` still reads `0`.
+
+This happens because Roblox treats a property set to its class default as not set at all, so whatever
+the stylesheet says wins. `0` is the default for `BackgroundTransparency`, and with `--approx=color` the
+user-agent rule says `1`. Every other value you set from code wins over the stylesheet as usual. outlass
+doesn't change anything here: it emits one fixed `BackgroundTransparency = 1` rule, and Roblox swaps in
+that value at run time when your code sets the default. To see what's actually drawn, use
+`frame:GetStyled("BackgroundTransparency")`, not the property.
+
+```lua
+-- broken: ends at 0, which Roblox reads as unset, so the user-agent's 1 shows
+TweenService:Create(frame, info, { BackgroundTransparency = 0 }):Play()
+
+-- works: any value other than the default counts as set
+TweenService:Create(frame, info, { BackgroundTransparency = 0.001 }):Play()
+```
+
+The cleaner fix is to put the visible state in the stylesheet and switch to it with a tag, so the
+transition comes from the stylesheet. A rule with a background always writes `BackgroundTransparency = 0`
+explicitly (see the transparency cascade), so this fade ends where it should:
+
+```scss
+.toast { background-color: #222; opacity: 0; transition: opacity 0.3s; }
+.toast.shown { opacity: 1; }
+```
+
+```lua
+frame:AddTag("shown")
+```
+
+The same applies to any property a rule sets, not only transparency:
+
+- **User-agent defaults.** Setting `BorderSizePixel = 1`, `AutomaticSize = None`, `RichText = false`,
+  `TextWrapped = false`, centred `TextXAlignment`/`TextYAlignment` or `AutoButtonColor = true` from code
+  is ignored too, because each is Roblox's default. Set these on a rule instead.
+- **Your own rules.** If `.badge { opacity: 0.5 }` gives a label `TextTransparency = 0.5`, a tween of
+  `TextTransparency` to `0` stops at `0.5`. `ImageTransparency`, `ScrollBarImageTransparency` and a
+  `::UIStroke`'s `Transparency` (all defaulting to `0`) behave the same way whenever a rule sets them.
+  The user-agent stylesheet sets none of these, so a fade to `0` from code only breaks when one of
+  your rules sets that property on the element.
 
 ### Sizing an element from its parent
 
@@ -303,8 +360,7 @@ names (`outlass functions`).
 Known differences from dart-sass: `/` always divides (there's no slash-separated shorthand).
 `@extend` handles single simple selectors (`.a`, `%p`), not complex selector weaving. `@forward`'s
 `show`/`hide` are accepted but not enforced. Plain CSS at-rules (`@font-face`, `@keyframes`, unsupported
-`@media` queries) have no Roblox meaning and are dropped with a warning. `@priority` is an at-rule
-dart-sass doesn't know, so it passes it through untouched and only outlass acts on it.
+`@media` queries) have no Roblox meaning and are dropped with a warning.
 
 Where dart-sass draws a line, so does outlass:
 - **`@extend` scope.** An `@extend` reaches the stylesheet it's written in and every stylesheet that
@@ -320,24 +376,13 @@ Where dart-sass draws a line, so does outlass:
 deprecates them for removal in 3.0; `color.scale()` / `color.adjust()` are the forward-compatible
 spellings.
 
-## Legacy `.lass` files
-
-`.lass` files compile with lass's semantics, so an existing lass stylesheet can be built by outlass unchanged
-and then migrated to SCSS piece by piece:
-- Nested selectors that don't start with a combinator attach to their parent (`:Hover`, `::UICorner` and
-  `.active` under `.button` mean `.button:Hover` and so on), because lass emitted nested StyleRules.
-- Declaration values holding Luau tables, like `ColorSequence.new({...})`, pass through verbatim.
-- `Transition: * 0.5s` sets the default transition, and `EaseIn`/`EaseOut`/`EaseInOut` are accepted.
-- A selector with an empty body is allowed.
-
 ## CLI
 
 ```
-outlass [OPTIONS] <INPUT>...        compile (globs ok; `-` = stdin; `_partials` skipped by globs)
+outlass [OPTIONS] <INPUT>...        compile (globs ok; `-` = SCSS on stdin; `_partials` skipped by globs)
 outlass properties [PROPERTY] [-g GROUP]
 outlass functions [FILTER]
 ```
 
 Common options: `-o FILE|-`, `-d DIR`, `--merge`, `--approx[=GROUPS]`, `-I DIR`, `-D name=value`,
-`--default-priority N`, `--cascade css|none`, `--color-format rgb|hex|float`, `--rem PX`,
-`--emit luau|css`, `--watch`, `-q`, `--strict`, `--deny-warnings`. See `outlass --help` for everything, with examples.
+`--emit luau|json|css`, `--allow-raw-luau`, `--watch`, `-q`, `--strict`, `--deny-warnings`. See `outlass --help` for everything, with examples.
