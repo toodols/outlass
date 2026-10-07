@@ -8,6 +8,7 @@ mod indented;
 mod luau;
 mod parser;
 mod query;
+mod rbxmx;
 mod roblox;
 mod selector;
 mod value;
@@ -46,7 +47,9 @@ strings, numbers; px is dropped, 50% → 0.5, 1s/1000ms → 1). Anything else is
 warning, so the generated code can only build a StyleSheet; luau(\"...\") inserts raw Luau, but \
 only with --allow-raw-luau.
   * Custom properties (--Name: value) become StyleRule attributes (design tokens); in \
-:root or at the top level they go on the StyleSheet. var(--Name) references a token (\"$Name\"). \
+:root or at the top level they go on the StyleSheet. [data-theme=\"dark\"] and \
+@media (prefers-color-scheme: dark) set a theme's tokens: theme StyleSheets the sheet derives from \
+(switch with sheet.Theme.StyleSheet = sheet.Themes.dark). var(--Name) references a token (\"$Name\"). \
 Their values are raw text, as in CSS and dart-sass, and are read back as a CSS value, so \
 substitute variables with #{$var} rather than writing $var on its own.
   * The CSS cascade sets StyleRule.Priority: `!important` declarations beat normal ones, \
@@ -146,6 +149,8 @@ enum Emit {
     Luau,
     /// The compiled StyleSheet as JSON: the rules and typed values the Luau is generated from
     Json,
+    /// A Roblox model file of the StyleSheet, for Studio or Rojo: data only, no code
+    Rbxmx,
     /// The evaluated stylesheet as plain CSS, before Roblox translation (for debugging)
     Css,
 }
@@ -360,6 +365,7 @@ fn plan(args: &BuildArgs) -> Result<Vec<Job>, String> {
     let ext = match args.emit {
         Emit::Luau => "luau",
         Emit::Json => "json",
+        Emit::Rbxmx => "rbxmx",
         Emit::Css => "css",
     };
     let stem = |p: &Path| p.file_stem().and_then(|s| s.to_str()).unwrap_or("StyleSheet").to_string();
@@ -508,7 +514,7 @@ fn codegen_options(
 ) -> CodegenOptions {
     let values = ValueOptions { allow_raw_luau: args.allow_raw_luau };
     CodegenOptions {
-        approx: ApproxOptions { groups: Group::expand(&args.approx), strict: args.strict },
+        approx: ApproxOptions { groups: Group::expand(&args.approx), strict: args.strict, tokens: HashMap::new() },
         values,
         sheet_name: sheet_name.to_string(),
         header,
@@ -564,6 +570,7 @@ fn run_job(job: &Job, args: &BuildArgs, opts: &Options, tags: &HashMap<String, V
             codegen::emit_luau(&combined, &codegen_options(args, &job.sheet_name, Some(label), tags), &mut diag)
         }
         Emit::Json => codegen::emit_json(&combined, &codegen_options(args, &job.sheet_name, None, tags), &mut diag),
+        Emit::Rbxmx => codegen::emit_rbxmx(&combined, &codegen_options(args, &job.sheet_name, None, tags), &mut diag),
         Emit::Css => codegen::emit_css(&combined),
     };
     print_diagnostics(&diag, args);

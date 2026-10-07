@@ -286,6 +286,29 @@ impl SelectorList {
         )
     }
 
+    /// `[data-theme="dark"]`, `:root[data-theme=dark]` or `html[data-theme='dark']`: the theme it
+    /// names, whose tokens it sets.
+    pub fn theme_name(&self) -> Option<String> {
+        let [complex] = self.0.as_slice() else { return None };
+        let [Part::Compound(simples)] = complex.as_slice() else { return None };
+        let mut theme = None;
+        for simple in simples {
+            match simple {
+                Simple::Attribute(a) => {
+                    let (name, value) = a.split_once('=')?;
+                    if name.trim() != "data-theme" || theme.is_some() {
+                        return None;
+                    }
+                    theme = Some(value.trim().trim_matches(['"', '\'']).to_string());
+                }
+                Simple::PseudoClass { name, arg: None } if name.eq_ignore_ascii_case("root") => {}
+                Simple::Type(t) if t.eq_ignore_ascii_case("html") => {}
+                _ => return None,
+            }
+        }
+        theme.filter(|t| !t.is_empty())
+    }
+
     /// `:root` (alone) — used for stylesheet-level tokens.
     pub fn is_root(&self) -> bool {
         self.0.len() == 1

@@ -1476,7 +1476,7 @@ fn font_size_is_the_em_so_text_size_scales_by_the_familys_line_height() {
 }
 
 #[test]
-fn non_color_custom_properties_are_compiled_in() {
+fn tokens_are_compiled_in_where_roblox_cant_look_them_up() {
     let (out, stderr) = compile(
         ":root { --accent: #7c5cff; --font-body: \"Source Sans Pro\", sans-serif; --radius: 8px; \
          --grad: linear-gradient(90deg, #000 0%, #fff 100%); } \
@@ -1490,7 +1490,8 @@ fn non_color_custom_properties_are_compiled_in() {
     assert!(a.contains("TextSize = 16"), "the family is known, so the size scales:\n{out}");
     // A color token stays a live reference, so a theme can still change it.
     assert!(a.contains("TextColor3 = \"$accent\""), "{out}");
-    assert!(rule_of(&out, ".a::UICorner").contains("CornerRadius = UDim.new(0, 8)"), "{out}");
+    // So does a length a property uses whole.
+    assert!(rule_of(&out, ".a::UICorner").contains("CornerRadius = \"$radius\""), "{out}");
     assert!(out.contains("\".a::UIGradient\""), "{out}");
     // The gradient token itself can only be an attribute as text, never as a Luau call.
     assert!(out.contains("SetAttribute(\"grad\", \"linear-gradient("), "{out}");
@@ -1825,4 +1826,127 @@ fn tags_must_name_gui_object_classes() {
     let (code, _, stderr) = run(&[input.to_str().unwrap(), "--tags", tags.to_str().unwrap(), "-o", "-"], None);
     assert_eq!(code, 2, "{stderr}");
     assert!(stderr.contains("`x` lists `Part`"), "{stderr}");
+}
+
+// ---------- themes, live tokens, model files ----------
+
+#[test]
+fn data_theme_and_color_scheme_rules_become_theme_sheets() {
+    let (out, stderr) = compile(
+        ":root { --bg: #fff; --gap: 4px; --keep: #123456; } [data-theme=\"dark\"] { --bg: #111; } \
+         @media (prefers-color-scheme: light) { :root { --gap: 12px; } } .a { background-color: var(--bg); }",
+        &["--approx"],
+    );
+    assert!(stderr.is_empty(), "{stderr}");
+    // A sheet's own attribute beats its theme's, so themed tokens live only on the themes.
+    assert!(out.contains("sheet:SetAttribute(\"keep\""), "{out}");
+    assert!(!out.contains("sheet:SetAttribute(\"bg\""), "{out}");
+    assert!(out.contains("local theme = Instance.new(\"StyleDerive\")\ntheme.Name = \"Theme\""), "{out}");
+    let default = &out[out.find("t.Name = \"default\"").unwrap()..];
+    assert!(default[..default.find("end").unwrap()].contains("theme.StyleSheet = t"), "{out}");
+    let dark = &out[out.find("t.Name = \"dark\"").unwrap()..];
+    let dark = &dark[..dark.find("end").unwrap()];
+    assert!(dark.contains("t:SetAttribute(\"bg\", Color3.fromRGB(17, 17, 17))"), "{out}");
+    assert!(dark.contains("t:SetAttribute(\"gap\", 4)"), "a theme starts from the defaults:\n{out}");
+    let light = &out[out.find("t.Name = \"light\"").unwrap()..];
+    assert!(light[..light.find("end").unwrap()].contains("t:SetAttribute(\"gap\", 12)"), "{out}");
+    assert!(rule_of(&out, ".a").contains("BackgroundColor3 = \"$bg\""), "{out}");
+}
+
+#[test]
+fn only_root_custom_properties_can_depend_on_a_theme() {
+    let (out, stderr) =
+        compile("@media (prefers-color-scheme: dark) { .a { Visible: false; } :root { color: red; } }", &[]);
+    assert!(stderr.contains("depends on the theme `dark`"), "{stderr}");
+    assert!(stderr.contains("property \"color\" in a theme is ignored"), "{stderr}");
+    assert!(!out.contains("\".a\""), "{out}");
+}
+
+#[test]
+fn length_tokens_stay_live_where_a_udim_property_uses_them_whole() {
+    let (out, stderr) = compile(
+        ":root { --radius: 8px; --half: 50%; --pad: 6px; --w: 30px; } \
+         .a { border-radius: var(--radius); padding: var(--pad); width: var(--w); height: 4px; } \
+         .b { border-radius: var(--half); } .c { padding: var(--pad); border: 2px solid red; }",
+        &["--approx"],
+    );
+    assert!(stderr.is_empty(), "{stderr}");
+    // A number attribute in a UDim property never updates in Roblox, so these are UDims.
+    assert!(out.contains("sheet:SetAttribute(\"radius\", UDim.new(0, 8))"), "{out}");
+    assert!(out.contains("sheet:SetAttribute(\"half\", UDim.new(0.5, 0))"), "{out}");
+    assert!(out.contains("sheet:SetAttribute(\"w\", 30)"), "a compiled-in token stays a number:\n{out}");
+    assert!(rule_of(&out, ".a::UICorner").contains("CornerRadius = \"$radius\""), "{out}");
+    assert!(rule_of(&out, ".a::UIPadding").contains("PaddingTop = \"$pad\""), "{out}");
+    assert!(rule_of(&out, ".a").contains("Size = UDim2.new(0, 30, 0, 4)"), "{out}");
+    assert!(rule_of(&out, ".b::UICorner").contains("CornerRadius = \"$half\""), "{out}");
+    // The border adds to the padding, which can't be the token then.
+    assert!(rule_of(&out, ".c::UIPadding").contains("PaddingTop = UDim.new(0, 8)"), "{out}");
+}
+
+#[test]
+fn a_redefined_token_is_resolved_in_the_redefining_rule() {
+    let (out, _) = compile(
+        ":root { --c: #000; --r: 4px; } .a { color: var(--c); border-radius: var(--r); } .a.b { --c: #f00; --r: 9px; }",
+        &["--approx"],
+    );
+    // A `"$Name"` reference only sees its own rule's tokens: the redefining rule repeats the
+    // declarations, and its pseudo-instance rule gets the attribute too.
+    let b = &out[out.find("rule(sheet, \".a.b\"").unwrap()..];
+    let b = &b[..b.find("\nend").unwrap()];
+    assert!(b.contains("TextColor3 = \"$c\"") && b.contains("SetAttribute(\"c\", Color3.fromRGB(255, 0, 0))"), "{out}");
+    let corner = &out[out.find("rule(sheet, \".a.b::UICorner\"").unwrap()..];
+    let corner = &corner[..corner.find("\nend").unwrap()];
+    assert!(
+        corner.contains("CornerRadius = \"$r\"") && corner.contains("SetAttribute(\"r\", UDim.new(0, 9))"),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_theme_token_compiled_in_warns() {
+    let (_, stderr) = compile(
+        ":root { --w: 10px; } [data-theme=dark] { --w: 20px; } .a { width: var(--w); height: 1px; }",
+        &["--approx"],
+    );
+    assert!(stderr.contains("`--w` changes with the theme, but `width` compiles it in"), "{stderr}");
+}
+
+#[test]
+fn emit_rbxmx_writes_a_model_without_code() {
+    let (out, stderr) = compile(
+        ":root { --bg: #fff; } [data-theme=dark] { --bg: #111; } \
+         .card { BackgroundColor3: var(--bg); Size: UDim2.new(0, 100, 0, 20); Transition: BackgroundColor3 0.2s; } \
+         .all { Transition: * 1s; }",
+        &["--emit", "rbxmx"],
+    );
+    assert!(out.starts_with("<roblox version=\"4\">"), "{out}");
+    assert!(out.contains("<Item class=\"StyleDerive\""), "{out}");
+    assert!(out.contains("<Ref name=\"StyleSheet\">RBX2</Ref>"), "{out}");
+    let card = &out[out.find("<string name=\"Selector\">.card</string>").unwrap()..];
+    // BackgroundColor3 = "$bg", Size = {0, 100}, {0, 20} — bytes Studio saves for the same values.
+    assert!(card.contains(
+        "<BinaryString name=\"PropertiesSerialize\">AgAAABAAAABCYWNrZ3JvdW5kQ29sb3IzAgMAAAAkYmcEAAAAU2l6ZQoAAAAAZAAAAAAAAAAUAAAA</BinaryString>"
+    ), "{out}");
+    assert!(card.contains("<BinaryString name=\"PropertyTransitionsSerialize\">"), "{out}");
+    assert!(stderr.contains("a default transition (`all`) isn't saved in a model file"), "{stderr}");
+    assert!(!out.contains("Instance.new") && !out.contains("local "), "{out}");
+}
+
+#[test]
+fn raw_luau_cant_go_in_a_model_file() {
+    let dir = TempDir::new("rbxmx-raw");
+    let input = dir.write("in.scss", ".a { Text: luau(\"require(1)\"); }");
+    let (code, _, stderr) = run(&[input.to_str().unwrap(), "--emit", "rbxmx", "--allow-raw-luau", "-o", "-"], None);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("a model file can't hold raw Luau"), "{stderr}");
+}
+
+#[test]
+fn overflow_wrap_break_word_is_what_roblox_does() {
+    let (_, stderr) = compile(
+        ".a { overflow-wrap: break-word; } .b { word-wrap: anywhere; } .c { overflow-wrap: normal; }",
+        &["--approx"],
+    );
+    assert_eq!(stderr.matches("warning").count(), 1, "{stderr}");
+    assert!(stderr.contains("always breaks a word too long for its line"), "{stderr}");
 }

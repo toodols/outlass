@@ -20,6 +20,7 @@ struct CascadeKey {
     order: usize,
 }
 
+#[derive(Clone)]
 pub struct CodegenOptions {
     pub values: ValueOptions,
     pub approx: ApproxOptions,
@@ -47,7 +48,14 @@ pub fn is_css_property(name: &str) -> bool {
     }
 }
 
-fn attributes(tokens: &[Token], opts: &ValueOptions, diag: &mut Diagnostics) -> Vec<(String, luau::Value)> {
+/// The attributes for tokens. `referenced` names the length tokens a UDim property references
+/// (see referenced_tokens), which have to be UDim attributes.
+fn attributes(
+    tokens: &[Token],
+    opts: &ValueOptions,
+    referenced: &HashMap<String, Value>,
+    diag: &mut Diagnostics,
+) -> Vec<(String, luau::Value)> {
     let mut out = Vec::new();
     for token in tokens {
         let name = roblox::attribute_name(&token.name);
@@ -58,6 +66,26 @@ fn attributes(tokens: &[Token], opts: &ValueOptions, diag: &mut Diagnostics) -> 
             );
         }
         let value = token_value(&token.value, &token.name, diag, &token.span);
+        // Roblox reads a number attribute in a UDim property as the offset, but only once: it
+        // never sees the token change again (measured in Studio), so a theme couldn't change it.
+        // A UDim attribute stays live, and a percentage needs one anyway, for its scale.
+        if let Value::Number(n) = &value
+            && (n.has_unit("%") || referenced.contains_key(&token.name))
+        {
+            let udim = if n.has_unit("%") {
+                luau::Value::udim(n.value / 100.0, 0.0)
+            } else {
+                match roblox::number_value(n) {
+                    Ok(px) => luau::Value::udim(0.0, px),
+                    Err(e) => {
+                        diag.warn(format!("token --{}: {e} (ignored)", token.name), Some(&token.span));
+                        continue;
+                    }
+                }
+            };
+            set(&mut out, name, udim);
+            continue;
+        }
         match roblox::value(&value, opts) {
             Ok(v) => set(&mut out, name, v),
             Err(e) if roblox::uses_raw_luau(&value) => {
@@ -102,16 +130,11 @@ fn token_value(v: &Value, name: &str, diag: &mut Diagnostics, span: &crate::diag
 /// opaque color token works that way everywhere outlass translates CSS: a font family, a length or
 /// a gradient has to be known at compile time to become a FontFace, a UDim or a UIGradient, and a
 /// Color3 attribute has no alpha, so a translucent color's transparency would be lost. So the
-/// `:root` value of every other token is substituted into the declarations that use it, unless a
-/// rule or query redefines that token, in which case its value isn't fixed.
+/// `:root` value of every other token is substituted into the declarations that use it. A rule
+/// that redefines the token compiles those declarations again with its own value (see
+/// redefined_token_uses).
 fn inline_tokens(sheet: &Sheet) -> HashMap<String, Value> {
-    let redefined: Vec<&str> = sheet.rules.iter().flat_map(|r| r.tokens.iter().map(|t| t.name.as_str())).collect();
-    sheet
-        .tokens
-        .iter()
-        .filter(|t| !redefined.contains(&t.name.as_str()))
-        .filter_map(|t| inline_value(t).map(|v| (t.name.clone(), v)))
-        .collect()
+    sheet.tokens.iter().filter_map(|t| inline_value(t).map(|v| (t.name.clone(), v))).collect()
 }
 
 /// A token's value to compile into the declarations that use it, or `None` for an opaque color,
@@ -160,17 +183,136 @@ fn redefined_token_uses(sheet: &Sheet, index: usize, tokens: &HashMap<String, Va
             _ => false,
         }
     }
-    let names: Vec<&str> =
-        sheet.rules[index].tokens.iter().map(|t| t.name.as_str()).filter(|n| tokens.contains_key(*n)).collect();
+    // A `"$Name"` reference only sees the tokens of the rule it's in, so references are re-emitted
+    // too: the redefining rule's copy resolves against its own attribute.
+    let _ = tokens;
+    let names: Vec<&str> = sheet.rules[index].tokens.iter().map(|t| t.name.as_str()).collect();
     if names.is_empty() {
         return Vec::new();
     }
     weaker_rules(sheet, index)
         .into_iter()
         .flat_map(|i| sheet.rules[i].decls.iter())
-        .filter(|d| is_css_property(&d.name) && uses(&d.value, &names))
+        .filter(|d| uses(&d.value, &names))
         .cloned()
         .collect()
+}
+
+/// The CSS properties whose length tokens stay `"$Name"` references (see ApproxOptions::tokens).
+const TOKEN_PROPERTIES: &[&str] = &[
+    "border-radius",
+    "gap",
+    "row-gap",
+    "column-gap",
+    "padding",
+    "padding-top",
+    "padding-right",
+    "padding-bottom",
+    "padding-left",
+    "padding-inline",
+    "padding-block",
+];
+
+/// Whether a token's value is a length a UDim can hold.
+fn is_length_token(v: &Value) -> bool {
+    matches!(v, Value::Number(n) if n.is_unitless() || n.has_unit("%") || n.has_unit("em") || n.has_unit("rem") || n.value_in("px").is_some())
+}
+
+/// The stylesheet's length tokens (and the ones only a theme sets) that a `border-radius`,
+/// `padding` or `gap` declaration, or a UDim property, uses, by name, with their values.
+fn referenced_tokens(sheet: &Sheet) -> HashMap<String, Value> {
+    fn uses(v: &Value, out: &mut Vec<String>) {
+        match v {
+            Value::Call { name, args } if name == "var" => {
+                if let Some(t) = args.first().and_then(|a| a.as_str()).and_then(|a| a.strip_prefix("--")) {
+                    out.push(t.to_string());
+                }
+            }
+            Value::List { items, .. } => items.iter().for_each(|i| uses(i, out)),
+            _ => {}
+        }
+    }
+    // Roblox UDim properties written out reference a token the same way.
+    const UDIM_PROPERTIES: &[&str] =
+        &["CornerRadius", "Padding", "PaddingTop", "PaddingRight", "PaddingBottom", "PaddingLeft"];
+    let mut used = Vec::new();
+    for decl in sheet.rules.iter().flat_map(|r| r.decls.iter()) {
+        if TOKEN_PROPERTIES.contains(&decl.name.as_str()) || UDIM_PROPERTIES.contains(&decl.name.as_str()) {
+            uses(&decl.value, &mut used);
+        }
+    }
+    let mut out = HashMap::new();
+    for t in sheet.tokens.iter().chain(sheet.themes.iter().flat_map(|(_, ts)| ts.iter())) {
+        if used.contains(&t.name)
+            && let Some(v) = inline_value(t)
+            && is_length_token(&v)
+        {
+            out.entry(t.name.clone()).or_insert(v);
+        }
+    }
+    out
+}
+
+/// A CSS declaration's value with its tokens compiled in, except the length tokens in `keep`,
+/// which `border-radius`, `padding` and `gap` reference by name.
+fn resolve_css(name: &str, v: &Value, tokens: &HashMap<String, Value>, keep: &[String]) -> Value {
+    if keep.is_empty() || !TOKEN_PROPERTIES.contains(&name) {
+        return inline_vars(v, tokens);
+    }
+    let compiled: HashMap<String, Value> =
+        tokens.iter().filter(|(k, _)| !keep.contains(k)).map(|(k, v)| (k.clone(), v.clone())).collect();
+    inline_vars(v, &compiled)
+}
+
+/// The referenced tokens a rule can keep as `"$Name"`: not ones a weaker rule for the same elements
+/// sets, which the reference couldn't see (it only sees the sheet's tokens and its own rule's).
+fn kept_tokens(sheet: &Sheet, index: usize, referenced: &HashMap<String, Value>) -> Vec<String> {
+    let shadowed: Vec<&str> = weaker_rules(sheet, index)
+        .into_iter()
+        .flat_map(|i| sheet.rules[i].tokens.iter().map(|t| t.name.as_str()))
+        .collect();
+    referenced.keys().filter(|k| !shadowed.contains(&k.as_str())).cloned().collect()
+}
+
+/// A theme changes a token at run time only where Roblox looks it up: a colour, or a length that
+/// `border-radius`, `padding` or `gap` uses whole. Anywhere else the token is compiled in with the
+/// default theme's value, which deserves a warning.
+fn warn_compiled_theme_tokens(sheet: &Sheet, referenced: &HashMap<String, Value>, diag: &mut Diagnostics) {
+    fn vars(v: &Value, out: &mut Vec<String>) {
+        match v {
+            Value::Call { name, args } if name == "var" => {
+                if let Some(t) = args.first().and_then(|a| a.as_str()).and_then(|a| a.strip_prefix("--")) {
+                    out.push(t.to_string());
+                }
+                args.iter().skip(1).for_each(|a| vars(a, out));
+            }
+            Value::Call { args, .. } => args.iter().for_each(|a| vars(a, out)),
+            Value::List { items, .. } => items.iter().for_each(|i| vars(i, out)),
+            _ => {}
+        }
+    }
+    let themed: Vec<&Token> = sheet.themes.iter().flat_map(|(_, ts)| ts.iter()).collect();
+    let mut warned: Vec<String> = Vec::new();
+    for decl in sheet.rules.iter().flat_map(|r| r.decls.iter()).filter(|d| is_css_property(&d.name)) {
+        let mut used = Vec::new();
+        vars(&decl.value, &mut used);
+        for name in used {
+            let Some(token) = themed.iter().find(|t| t.name == name) else { continue };
+            let looked_up = inline_value(token).is_none()
+                || (TOKEN_PROPERTIES.contains(&decl.name.as_str()) && referenced.contains_key(&name));
+            if looked_up || warned.contains(&name) {
+                continue;
+            }
+            diag.warn(
+                format!(
+                    "`--{name}` changes with the theme, but `{}` compiles it in, so it keeps the default theme's value",
+                    decl.name
+                ),
+                Some(&decl.span),
+            );
+            warned.push(name);
+        }
+    }
 }
 
 /// `@font-face` names in `font-family` and `font` replaced by the font assets they stand for.
@@ -483,7 +625,11 @@ pub fn lower(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -> lu
         substituted = with_font_faces(sheet);
         &substituted
     };
-    let sheet_attributes = attributes(&sheet.tokens, &opts.values, diag);
+    let referenced = referenced_tokens(sheet);
+    let opts =
+        &CodegenOptions { approx: ApproxOptions { tokens: referenced.clone(), ..opts.approx.clone() }, ..opts.clone() };
+    let (sheet_attributes, themes) = sheet_and_theme_attributes(sheet, opts, diag);
+    warn_compiled_theme_tokens(sheet, &referenced, diag);
 
     let mut rules: Vec<Rule> = Vec::new();
     let hides_anything = sheet.rules.iter().any(|r| r.decls.iter().any(hides));
@@ -516,6 +662,7 @@ pub fn lower(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -> lu
             None => vec![None],
         };
         let tokens = rule_tokens(sheet, idx, &root_tokens);
+        let keep = kept_tokens(sheet, idx, &referenced);
         if let Some(base) = rule.selector.strip_pseudo_element("placeholder") {
             let priority = priorities.get(&(idx, false)).or(priorities.get(&(idx, true))).copied().flatten();
             let selector = base.to_roblox(diag, Some(&rule.span));
@@ -537,8 +684,8 @@ pub fn lower(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -> lu
                 part.decls.splice(0..0, redefined_token_uses(sheet, idx, &tokens));
             }
             let part = &part;
-            let inherited = inherited_decls(sheet, idx);
-            let mut lowered = lower_rule(part, &inherited, &tokens, selector.clone(), priority, opts, diag);
+            let inherited = inherited_decls(sheet, idx, &part.decls);
+            let mut lowered = lower_rule(part, &inherited, &tokens, &keep, selector.clone(), priority, opts, diag);
             if let Some(classes) = rule.selector.subject_classes(&opts.tags)
                 && let Some(main) = lowered.iter_mut().find(|r| !r.selector.contains("::"))
             {
@@ -664,7 +811,39 @@ pub fn lower(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -> lu
             },
         );
     }
-    luau::Sheet { name: opts.sheet_name.clone(), attributes: sheet_attributes, rules }
+    luau::Sheet { name: opts.sheet_name.clone(), attributes: sheet_attributes, rules, themes }
+}
+
+/// The stylesheet's own attributes, and its themes. A sheet's own attribute beats the one on the
+/// theme it derives from (measured in Studio), so a themed token lives only on the themes: the
+/// default theme gets its `:root` value and every other theme starts from those.
+fn sheet_and_theme_attributes(
+    sheet: &Sheet,
+    opts: &CodegenOptions,
+    diag: &mut Diagnostics,
+) -> (Vec<(String, luau::Value)>, Vec<luau::Theme>) {
+    let base = attributes(&sheet.tokens, &opts.values, &opts.approx.tokens, diag);
+    if sheet.themes.is_empty() {
+        return (base, Vec::new());
+    }
+    let themed: Vec<String> =
+        sheet.themes.iter().flat_map(|(_, ts)| ts.iter().map(|t| roblox::attribute_name(&t.name))).collect();
+    let (default, own): (Vec<_>, Vec<_>) = base.into_iter().partition(|(name, _)| themed.contains(name));
+    let mut themes = vec![luau::Theme { name: "default".into(), attributes: default }];
+    for (name, tokens) in &sheet.themes {
+        let overrides = attributes(tokens, &opts.values, &opts.approx.tokens, diag);
+        let index = match themes.iter().position(|t| t.name == *name) {
+            Some(i) => i,
+            None => {
+                themes.push(luau::Theme { name: name.clone(), attributes: themes[0].attributes.clone() });
+                themes.len() - 1
+            }
+        };
+        for (k, v) in overrides {
+            set(&mut themes[index].attributes, k, v);
+        }
+    }
+    (own, themes)
 }
 
 /// The GuiObject classes a stylesheet can select, used for the user-agent defaults. Every one of
@@ -1004,11 +1183,10 @@ fn composite_groups(name: &str) -> Vec<&'static [&'static str]> {
 /// `left`), the parts it doesn't set (`top`) still apply to its elements from weaker rules that
 /// match all of them (`.bar` for `.bar.left`), exactly as CSS would cascade them. Those declarations
 /// are returned so the rule's Roblox `Position` can be computed from all of them.
-fn inherited_decls(sheet: &Sheet, index: usize) -> Vec<Decl> {
-    let rule = &sheet.rules[index];
+fn inherited_decls(sheet: &Sheet, index: usize, decls: &[OutDecl]) -> Vec<Decl> {
     let groups: Vec<&[&str]> = {
         let mut groups: Vec<&[&str]> = Vec::new();
-        for decl in rule.decls.iter().filter(|d| is_css_property(&d.name)) {
+        for decl in decls.iter().filter(|d| is_css_property(&d.name)) {
             for group in composite_groups(&decl.name) {
                 if !groups.iter().any(|g| std::ptr::eq(*g, group)) {
                     groups.push(group);
@@ -1255,21 +1433,27 @@ fn drop_missing_properties(
 /// Marks a property in `own_only`, which only records which properties a rule produces.
 const PLACEHOLDER: luau::Value = luau::Value::Bool(false);
 
+#[allow(clippy::too_many_arguments)]
 fn lower_rule(
     rule: &OutRule,
     inherited: &[Decl],
     tokens: &HashMap<String, Value>,
+    keep: &[String],
     selector: String,
     priority: Option<f64>,
     opts: &CodegenOptions,
     diag: &mut Diagnostics,
 ) -> Vec<Rule> {
     let mut main = Rule { selector, priority, ..Default::default() };
-    main.attributes = attributes(&rule.tokens, &opts.values, diag);
+    main.attributes = attributes(&rule.tokens, &opts.values, &opts.approx.tokens, diag);
 
     let mut css: Vec<Decl> = inherited
         .iter()
-        .map(|d| Decl { name: d.name.clone(), value: inline_vars(&d.value, tokens), span: d.span.clone() })
+        .map(|d| Decl {
+            name: d.name.clone(),
+            value: resolve_css(&d.name, &d.value, tokens, keep),
+            span: d.span.clone(),
+        })
         .collect();
     let mut explicit: Vec<(String, luau::Value)> = Vec::new();
     let mut explicit_transitions: Vec<(String, luau::TweenInfo)> = Vec::new();
@@ -1277,7 +1461,7 @@ fn lower_rule(
         if CONTAINER_PROPERTIES.contains(&decl.name.as_str()) {
             // Marks the element as a query container; see query_definitions.
         } else if is_css_property(&decl.name) {
-            let value = inline_vars(&decl.value, tokens);
+            let value = resolve_css(&decl.name, &decl.value, tokens, keep);
             css.push(Decl { name: decl.name.clone(), value, span: Some(decl.span.clone()) });
         } else if decl.name.eq_ignore_ascii_case("Transition") {
             match approx::roblox_transitions(&decl.value) {
@@ -1324,7 +1508,11 @@ fn lower_rule(
             .decls
             .iter()
             .filter(|d| is_css_property(&d.name))
-            .map(|d| Decl { name: d.name.clone(), value: inline_vars(&d.value, tokens), span: Some(d.span.clone()) })
+            .map(|d| Decl {
+                name: d.name.clone(),
+                value: resolve_css(&d.name, &d.value, tokens, keep),
+                span: Some(d.span.clone()),
+            })
             .collect();
         let mut own_only = approx::translate(&own, &opts.approx, &mut Diagnostics::default());
         // `opacity` scales what the weaker rules paint, so it recomputes their transparencies too:
@@ -1390,10 +1578,19 @@ fn lower_rule(
                 .find(|(c, _)| *c == class)
                 .map(|(_, t)| t.clone())
                 .unwrap_or_default();
+            // A `"$Name"` reference only sees its own rule's tokens, so the pseudo-instance rule
+            // gets a copy of each one of the rule's it uses.
+            let attributes = main
+                .attributes
+                .iter()
+                .filter(|(name, _)| props.iter().any(|(_, v)| matches!(v, luau::Value::Token(t) if t == name)))
+                .cloned()
+                .collect();
             Rule {
                 selector: rule.selector.with_pseudo_instance(&class).to_roblox(&mut Diagnostics::default(), None),
                 priority,
                 props,
+                attributes,
                 transitions,
                 ..Default::default()
             }
@@ -1418,6 +1615,22 @@ pub fn emit_luau(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -
         Ok(code) => code,
         Err(e) => {
             diag.error(format!("can't emit Luau: {e}"), None);
+            String::new()
+        }
+    }
+}
+
+/// The lowered stylesheet as a Roblox model file (see `rbxmx::write`).
+pub fn emit_rbxmx(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -> String {
+    match crate::rbxmx::write(&lower(sheet, opts, diag)) {
+        Ok((model, dropped)) => {
+            for d in dropped {
+                diag.warn(d, None);
+            }
+            model
+        }
+        Err(e) => {
+            diag.error(format!("can't write the model file: {e}"), None);
             String::new()
         }
     }

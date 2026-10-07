@@ -87,6 +87,33 @@ and every value typed (`{"type": "UDim2", "x": {"scale": 0, "offset": 4}, ...}`,
 "Font", "item": "Gotham"}`, `{"type": "token", "name": "Accent"}`; infinity is `"inf"`). The Luau is
 generated from exactly this, by one module (`src/luau.rs`) that escapes every string and checks every name.
 
+`--emit rbxmx` writes the same StyleSheet as a Roblox model file instead, which Studio and Rojo load
+directly: instances whose properties are data, with no code to run, so it can't hold `luau("...")`.
+Its Enum items are saved as numbers, which outlass knows for the enums GUI objects use (`src/enums.txt`,
+from Roblox's API dump). Roblox doesn't save a default transition (`transition: all`) in a model, so
+that one warns and is left out. Rojo builds and live-syncs StyleRule properties, but its live sync
+doesn't update transitions.
+
+## Themes
+
+`[data-theme="dark"]` (also `:root[data-theme=dark]` or `html[data-theme=dark]`) and
+`@media (prefers-color-scheme: dark) { :root { ... } }` set a theme's tokens:
+
+```scss
+:root { --bg: #ffffff; --radius: 8px; }
+[data-theme="dark"] { --bg: #111827; --radius: 4px; }
+```
+
+Each theme becomes a StyleSheet in a `Themes` folder under the sheet, holding every themed token (a
+theme starts from the `:root` values and overrides some), and the sheet derives from one of them
+through a StyleDerive named `Theme`. The `default` theme is in use at first; switch with
+`sheet.Theme.StyleSheet = sheet.Themes.dark`. A theme only sets custom properties, and only `:root`
+can depend on one.
+
+A theme can only change what Roblox looks up at run time (see below): a color, or a length that
+`border-radius`, `padding` or `gap` uses whole. A themed token compiled in anywhere else warns that it
+keeps the default theme's value.
+
 ## The cascade
 
 Roblox resolves conflicting StyleRules only by `Priority`, so outlass works out which rule CSS would apply and
@@ -118,14 +145,18 @@ centers it; a `TextButton` stays centered, as a browser centers a button's conte
 set the property on any rule, e.g. `RichText: false` or `AutomaticSize: Enum.AutomaticSize.None`.
 
 A `var()` in a CSS property is a `"$Name"` reference that Roblox resolves at run time, so a theme can
-change it. That only works for opaque colors, though (a Color3 attribute has no alpha, so a translucent
-color is compiled in too): a font family, a length or a gradient has to be known when
-outlass compiles it into a `FontFace`, a `UDim` or a `UIGradient`. So `var(--font-body)` or
-`var(--radius)` gets the token's value compiled in. Tokens cascade as in CSS: a rule uses the value
-its own elements get, from `:root`, a weaker rule for the same elements, or the rule itself. When a
-rule redefines a token (`.a.b { --gap: 10px }`), the declarations that use it (`.a { padding: var(--gap) }`)
-are compiled again for that rule. The attribute is still set, as text when it has no attribute type
-(a gradient).
+change it, wherever the token is the whole value of a Roblox property: an opaque color, or a length in
+`border-radius`, `padding` or `gap` (`CornerRadius = "$radius"`). Such a length token is a `UDim`
+attribute, because Roblox reads a number attribute in a UDim property once and never sees it change.
+Everything else has to be known when outlass compiles it: a font family into a `FontFace`, a length
+into a `Size`, padding plus a border's width, a gradient into a `UIGradient`, a translucent color (a
+Color3 attribute has no alpha). Those get the token's value compiled in.
+
+Tokens cascade as in CSS: a rule uses the value its own elements get, from `:root`, a weaker rule for
+the same elements, or the rule itself. A `"$Name"` reference only sees the sheet's tokens and its own
+rule's, so when a rule redefines a token (`.a.b { --gap: 10px }`), the declarations that use it
+(`.a { padding: var(--gap) }`) are repeated in that rule, with the token set on each of its rules. The
+attribute is always set, as text when it has no attribute type (a gradient).
 
 ### A fade from code ends invisible
 
@@ -246,6 +277,9 @@ ignored with a warning that names the flag to enable. Explicit Roblox properties
 It follows CSS semantics where Roblox allows:
 - `position: absolute` with `left` and `right` (or `inset: 0`) and no width stretches the element.
 - `translate(-50%, -50%)` centers it.
+- `transform: scale()` grows an element from its `AnchorPoint`, which is the top left unless something
+  positions it from another edge; CSS grows it from the center. `rotate()` turns it around its center
+  in both. Roblox has no `transform-origin`.
 - `margin` offsets an element from the edge it's placed by, and insets one stretched between two
   edges, so `inset: 0; margin: 8px` leaves 8px all around. `margin: 0 auto` centers an element with a
   width, and `margin-left: auto` pushes it right. Margins never move siblings, and a flex or grid
@@ -456,4 +490,4 @@ outlass functions [FILTER]
 ```
 
 Common options: `-o FILE|-`, `-d DIR`, `--merge`, `--approx[=GROUPS]`, `-I DIR`, `-D name=value`,
-`--emit luau|json|css`, `--tags FILE`, `--allow-raw-luau`, `--watch`, `-q`, `--strict`, `--deny-warnings`. See `outlass --help` for everything, with examples.
+`--emit luau|json|rbxmx|css`, `--tags FILE`, `--allow-raw-luau`, `--watch`, `-q`, `--strict`, `--deny-warnings`. See `outlass --help` for everything, with examples.

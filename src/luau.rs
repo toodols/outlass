@@ -115,12 +115,22 @@ impl Rule {
     }
 }
 
-/// A StyleSheet: its attributes (design tokens) and rules.
+/// A StyleSheet: its attributes (design tokens), rules and themes.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Sheet {
     pub name: String,
     pub attributes: Vec<(String, Value)>,
     pub rules: Vec<Rule>,
+    /// Theme StyleSheets holding the themed tokens; the first is the one in use. The sheet
+    /// derives from it through a StyleDerive named `Theme`, so switching theme is
+    /// `sheet.Theme.StyleSheet = sheet.Themes.dark`.
+    pub themes: Vec<Theme>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Theme {
+    pub name: String,
+    pub attributes: Vec<(String, Value)>,
 }
 
 pub struct EmitOptions {
@@ -145,6 +155,28 @@ pub fn emit(sheet: &Sheet, opts: &EmitOptions) -> Result<String, String> {
     let _ = writeln!(out, "sheet.Name = {}", string(&sheet.name));
     for (name, value) in &sheet.attributes {
         let _ = writeln!(out, "sheet:SetAttribute({}, {})", string(name), expression(value, opts)?);
+    }
+    if !sheet.themes.is_empty() {
+        out.push_str(
+            "\nlocal themes = Instance.new(\"Folder\")\n\
+             themes.Name = \"Themes\"\n\
+             themes.Parent = sheet\n\
+             local theme = Instance.new(\"StyleDerive\")\n\
+             theme.Name = \"Theme\"\n",
+        );
+        for (i, t) in sheet.themes.iter().enumerate() {
+            out.push_str("do\n\tlocal t = Instance.new(\"StyleSheet\")\n");
+            let _ = writeln!(out, "\tt.Name = {}", string(&t.name));
+            for (name, value) in &t.attributes {
+                let _ = writeln!(out, "\tt:SetAttribute({}, {})", string(name), expression(value, opts)?);
+            }
+            out.push_str("\tt.Parent = themes\n");
+            if i == 0 {
+                out.push_str("\ttheme.StyleSheet = t\n");
+            }
+            out.push_str("end\n");
+        }
+        out.push_str("theme.Parent = sheet\n");
     }
     if !sheet.rules.is_empty() {
         out.push_str(
@@ -509,6 +541,16 @@ pub fn to_json(sheet: &Sheet) -> String {
         ("name", str(&sheet.name)),
         ("attributes", map_json(&sheet.attributes, value_json)),
         ("rules", Json::Array(sheet.rules.iter().map(rule_json).collect())),
+        (
+            "themes",
+            Json::Array(
+                sheet
+                    .themes
+                    .iter()
+                    .map(|t| obj(vec![("name", str(&t.name)), ("attributes", map_json(&t.attributes, value_json))]))
+                    .collect(),
+            ),
+        ),
     ]);
     let mut out = String::new();
     write_json(&mut out, &doc, 0);
@@ -663,6 +705,7 @@ mod tests {
                 ],
                 ..Default::default()
             }],
+            ..Default::default()
         };
         let json = to_json(&sheet);
         assert!(

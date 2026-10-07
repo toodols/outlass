@@ -19,7 +19,7 @@ outlass ui.scss --approx
 | `-a, --approx[=GROUPS]` | Approximates CSS properties in Roblox ones. Default = all groups, or pick from `color,opacity,text,size,position,box,layout,visibility,transition`. Without it, CSS properties are ignored with a warning |
 | `-I, --load-path DIR` | Extra directory for `@use`/`@forward`/`@import` |
 | `-D, --define NAME=VALUE` | Set a global variable, overriding `!default` |
-| `--emit luau\|json\|css` | `json` writes the compiled StyleSheet (rules and typed values) the Luau is generated from. `css` prints the evaluated SCSS before Roblox translation, for debugging |
+| `--emit luau\|json\|rbxmx\|css` | `json` writes the compiled StyleSheet (rules and typed values) the Luau is generated from. `rbxmx` writes it as a Roblox model file, data only, for Studio or Rojo. `css` prints the evaluated SCSS before Roblox translation, for debugging |
 | `--tags FILE` | JSON mapping each tag (or `#Name`) to the GuiObject classes it's used on, so rules drop and warn about properties those classes don't have |
 | `--allow-raw-luau` | Let `luau("...")` insert raw Luau. Off by default, so the output can only build a StyleSheet |
 | `-w, --watch` | Recompile when an input or anything it imports changes |

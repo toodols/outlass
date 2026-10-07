@@ -4,6 +4,8 @@
 //! translated into near-equivalent `GuiObject` properties, and into properties on pseudo-instances
 //! (phantom children created via a `::ClassName` selector suffix, e.g. `Frame::UICorner`).
 
+use std::collections::HashMap;
+
 use crate::diag::{Diagnostics, Span};
 use crate::luau;
 use crate::roblox;
@@ -109,6 +111,10 @@ const DEFAULT_FONT: &str = "rbxasset://fonts/families/SourceSansPro.json";
 
 #[derive(Clone)]
 pub struct ApproxOptions {
+    /// Length tokens on the stylesheet that `border-radius`, `padding` and `gap` reference by name
+    /// (`"$radius"`), so a theme can change them: token name → its value. Codegen leaves their
+    /// `var()`s in those declarations.
+    pub tokens: HashMap<String, Value>,
     /// Already expanded (no `All`).
     pub groups: Vec<Group>,
     /// Warn about CSS that compiles to a different layout than a browser gives it (`--strict`).
@@ -321,6 +327,14 @@ pub static PROPERTIES: &[PropDoc] = &[
                 does. Text inside the element inherits LineHeight, but not the padding",
     },
     PropDoc { css: "white-space", group: Group::Text, roblox: "TextWrapped", notes: "" },
+    PropDoc {
+        css: "overflow-wrap",
+        group: Group::Text,
+        roblox: "(implied)",
+        notes: "wrapped Roblox text always breaks a word too long for its line, as `break-word` and `anywhere` \
+                do; `normal` warns",
+    },
+    PropDoc { css: "word-wrap", group: Group::Text, roblox: "(implied)", notes: "the old name of `overflow-wrap`" },
     PropDoc { css: "text-wrap", group: Group::Text, roblox: "TextWrapped", notes: "" },
     PropDoc { css: "text-overflow", group: Group::Text, roblox: "TextTruncate", notes: "" },
     PropDoc { css: "content", group: Group::Text, roblox: "Text", notes: "a string; replaces the element's text" },
@@ -620,6 +634,8 @@ fn unknown_hint(css: &str) -> Option<&'static str> {
         // `letter-spacing`, `word-spacing` and `cursor` have nothing to point at: Roblox has no
         // property and no rich-text attribute for them. The bare warning already says so.
         "float" | "clear" => Some("use layout properties instead"),
+        "transform-origin" => Some("Roblox rotates an element around its center and scales it around its AnchorPoint"),
+        "flex-basis" => Some("a Roblox flex item grows and shrinks from its Size, so set `width` or `height`"),
         _ => None,
     }
 }
@@ -655,6 +671,14 @@ pub fn translate(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics) -
     }
     if opts.groups.contains(&Group::Text) {
         translate_text(decls, diag, &mut out);
+        if let Some(d) = last(decls, "overflow-wrap").or_else(|| last(decls, "word-wrap"))
+            && d.value.as_str().is_some_and(|s| s.eq_ignore_ascii_case("normal"))
+        {
+            diag.warn(
+                "wrapped Roblox text always breaks a word too long for its line, as `overflow-wrap: break-word` does",
+                d.span.as_ref(),
+            );
+        }
         if let Some((lower, upper)) = scaled_text {
             scale_text(lower, upper, &mut out);
         }
@@ -1207,6 +1231,23 @@ fn resolve_color(v: &Value) -> Result<(luau::Value, Option<f64>), String> {
             Ok((roblox::color3(&Color::rgba(0.0, 0.0, 0.0, 1.0)), Some(0.0)))
         }
         _ => Err(format!("expected a color, got `{}`", v.inspect())),
+    }
+}
+
+/// A `var()` of a length token in `ApproxOptions::tokens`: its `"$Name"` reference, which Roblox
+/// resolves at run time, and its value.
+fn token_length(v: &Value, opts: &ApproxOptions) -> Option<(luau::Value, (f64, f64))> {
+    let Value::Call { name, args } = v else { return None };
+    let token = args.first()?.as_str()?.strip_prefix("--").filter(|_| name == "var")?;
+    let value = length_value(opts.tokens.get(token)?).ok()?;
+    Some((luau::Value::Token(roblox::attribute_name(token)), value))
+}
+
+/// A length, or the value of a length token where the property can't reference it.
+fn length_or_token(v: &Value, opts: &ApproxOptions) -> Result<(f64, f64), String> {
+    match token_length(v, opts) {
+        Some((_, value)) => Ok(value),
+        None => length_value(v),
     }
 }
 
@@ -3315,9 +3356,12 @@ fn translate_box(
                 d.span.as_ref(),
             );
         }
-        match length_value(&items[0]) {
-            Ok((s, o)) => out.set_pseudo_prop("UICorner", "CornerRadius", luau::Value::udim(s, o)),
-            Err(e) => diag.warn(format!("`border-radius`: {e} (ignored)"), d.span.as_ref()),
+        match token_length(&items[0], opts) {
+            Some((token, _)) => out.set_pseudo_prop("UICorner", "CornerRadius", token),
+            None => match length_value(&items[0]) {
+                Ok((s, o)) => out.set_pseudo_prop("UICorner", "CornerRadius", luau::Value::udim(s, o)),
+                Err(e) => diag.warn(format!("`border-radius`: {e} (ignored)"), d.span.as_ref()),
+            },
         }
     }
 
@@ -3364,7 +3408,14 @@ fn translate_box(
                 _ => 0.0,
             };
         match side {
-            Some((v, span)) => match length_value(&v) {
+            // The border and the half-leading add to the padding, which then can't be the token.
+            Some((v, _))
+                if extra == 0.0
+                    && let Some((token, _)) = token_length(&v, opts) =>
+            {
+                out.set_pseudo_prop("UIPadding", PADDING_NAMES[i], token)
+            }
+            Some((v, span)) => match length_or_token(&v, opts) {
                 Ok((s, o)) => out.set_pseudo_prop("UIPadding", PADDING_NAMES[i], luau::Value::udim(s, o + extra)),
                 Err(e) => diag.warn(format!("`padding`: {e} (ignored)"), span.as_ref()),
             },
@@ -3854,19 +3905,22 @@ fn translate_layout(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics
     let gap_span = ["gap", "row-gap", "column-gap"].iter().find_map(|n| last(decls, n)).and_then(|d| d.span.as_ref());
     let list_gap = if direction_column { &rg } else { &cg };
     if let (Some(v), false) = (list_gap, is_grid) {
-        match length_value(v) {
-            Ok((s, o)) => out.set_pseudo_prop("UIListLayout", "Padding", luau::Value::udim(s, o)),
-            Err(e) => diag.warn(format!("`gap`: {e} (ignored)"), gap_span),
+        match token_length(v, opts) {
+            Some((token, _)) => out.set_pseudo_prop("UIListLayout", "Padding", token),
+            None => match length_value(v) {
+                Ok((s, o)) => out.set_pseudo_prop("UIListLayout", "Padding", luau::Value::udim(s, o)),
+                Err(e) => diag.warn(format!("`gap`: {e} (ignored)"), gap_span),
+            },
         }
     }
     let cell_padding = |v: &Option<Value>| match v {
-        Some(v) => length_value(v).unwrap_or((0.0, 0.0)),
+        Some(v) => length_or_token(v, opts).unwrap_or((0.0, 0.0)),
         None => (0.0, 0.0),
     };
     let (column_gap, row_gap) = (cell_padding(&cg), cell_padding(&rg));
     if is_grid
         && let (Some(c), Some(r)) = (&cg, &rg)
-        && let (Ok((cs, co)), Ok((rs, ro))) = (length_value(c), length_value(r))
+        && let (Ok((cs, co)), Ok((rs, ro))) = (length_or_token(c, opts), length_or_token(r, opts))
     {
         out.set_pseudo_prop("UIGridLayout", "CellPadding", luau::Value::udim2(cs, co, rs, ro));
     }
@@ -4526,7 +4580,7 @@ mod tests {
     use super::*;
 
     fn opts_for(groups: &[Group]) -> ApproxOptions {
-        ApproxOptions { groups: Group::expand(groups), strict: false }
+        ApproxOptions { groups: Group::expand(groups), strict: false, tokens: HashMap::new() }
     }
 
     fn all_opts() -> ApproxOptions {

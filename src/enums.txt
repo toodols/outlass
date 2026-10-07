@@ -1,0 +1,64 @@
+# The Enum items GUI objects and UI components use, with the numbers Roblox serializes them as.
+# Generated from Roblox's API dump (Full-API-Dump.json); `--emit rbxmx` needs them, Luau doesn't.
+ApplyShadowMode Shape=0 Text=1
+ApplyStrokeMode Contextual=0 Border=1
+AspectType FitWithinMaxSize=0 ScaleWithParentSize=1
+AutomaticSize None=0 X=1 Y=2 XY=3
+BorderMode Outline=0 Middle=1 Inset=2
+BorderStrokePosition Outer=0 Center=1 Inner=2
+ButtonStyle Custom=0 RobloxButtonDefault=1 RobloxButton=2 RobloxRoundButton=3 RobloxRoundDefaultButton=4 RobloxRoundDropdownButton=5
+DisplaySize Small=0 Medium=1 Large=2
+DominantAxis Width=0 Height=1
+DraggingScrollBar None=0 Horizontal=1 Vertical=2
+EasingDirection In=0 Out=1 InOut=2
+EasingStyle Linear=0 Sine=1 Back=2 Quad=3 Quart=4 Quint=5 Bounce=6 Elastic=7 Exponential=8 Circular=9 Cubic=10
+ElasticBehavior WhenScrollable=0 Always=1 Never=2
+FillDirection Horizontal=0 Vertical=1
+Font Legacy=0 Arial=1 ArialBold=2 SourceSans=3 SourceSansBold=4 SourceSansLight=5 SourceSansItalic=6 Bodoni=7 Garamond=8 Cartoon=9 Code=10 Highway=11 SciFi=12 Arcade=13 Fantasy=14 Antique=15 SourceSansSemibold=16 Gotham=17 GothamMedium=18 GothamBold=19 GothamBlack=20 AmaticSC=21 Bangers=22 Creepster=23 DenkOne=24 Fondamento=25 FredokaOne=26 GrenzeGotisch=27 IndieFlower=28 JosefinSans=29 Jura=30 Kalam=31 LuckiestGuy=32 Merriweather=33 Michroma=34 Nunito=35 Oswald=36 PatrickHand=37 PermanentMarker=38 Roboto=39 RobotoCondensed=40 RobotoMono=41 Sarpanch=42 SpecialElite=43 TitilliumWeb=44 Ubuntu=45 BuilderSans=46 BuilderSansMedium=47 BuilderSansBold=48 BuilderSansExtraBold=49 Arimo=50 ArimoBold=51 Unknown=100
+FontSize Size8=0 Size9=1 Size10=2 Size11=3 Size12=4 Size14=5 Size18=6 Size24=7 Size36=8 Size48=9 Size28=10 Size32=11 Size42=12 Size60=13 Size96=14
+FontStyle Normal=0 Italic=1
+FontWeight Thin=100 ExtraLight=200 Light=300 Regular=400 Medium=500 SemiBold=600 Bold=700 ExtraBold=800 Heavy=900
+FrameStyle Custom=0 ChatBlue=1 RobloxSquare=2 RobloxRound=3 ChatGreen=4 ChatRed=5 DropShadow=6
+GradientTileMode Clamp=0 Repeat=1 Mirror=2
+GradientType Linear=0 Radial=1 Conical=2 Elliptical=3
+GuiState Idle=0 Hover=1 Press=2 NonInteractable=3
+HorizontalAlignment Center=0 Left=1 Right=2
+InputSink None=0 Activate=1 All=100
+InternalVideoUsage Default=0 WatchPage=1 HomeCarousel=2 FeatureTileAd=3
+ItemLineAlignment Automatic=0 Start=1 Center=2 End=3 Stretch=4
+LineJoinMode Round=0 Bevel=1 Miter=2
+PredictionMode Automatic=0 On=1 Off=2
+PreferredInput KeyboardAndMouse=0 Gamepad=1 Touch=2 MicroGamepad=3
+PreferredTextSize Medium=1 Large=2 Larger=3 Largest=4
+PropertyStatus Ok=0 Warning=1 Error=2
+ResamplerMode Default=0 Pixelated=1
+ReturnKeyType Default=0 Done=1 Go=2 Next=3 Search=4 Send=5
+RollOffMode Inverse=0 Linear=1 LinearSquare=2 InverseTapered=3
+SafeAreaCompatibility None=0 FullscreenExtension=1
+ScaleType Stretch=0 Slice=1 Tile=2 Fit=3 Crop=4
+ScreenInsets None=0 DeviceSafeInsets=1 CoreUISafeInsets=2 TopbarSafeInsets=3
+ScrollBarInset None=0 ScrollBar=1 Always=2
+ScrollingDirection X=1 Y=2 XY=4
+SelectionBehavior Escape=0 Stop=1
+SizeConstraint RelativeXY=0 RelativeXX=1 RelativeYY=2
+SortOrder Name=0 Custom=1 LayoutOrder=2
+StartCorner TopLeft=0 TopRight=1 BottomLeft=2 BottomRight=3
+StrokeSizingMode FixedSize=0 ScaledSize=1
+TableMajorAxis RowMajor=0 ColumnMajor=1
+TextDirection Auto=0 LeftToRight=1 RightToLeft=2
+TextInputType Default=0 NoSuggestions=1 Number=2 Email=3 Phone=4 Password=5 PasswordShown=6 Username=7 OneTimePassword=8 NewPassword=9 NewPasswordShown=10
+TextTruncate None=0 AtEnd=1 SplitWord=2
+TextXAlignment Left=0 Right=1 Center=2
+TextYAlignment Top=0 Center=1 Bottom=2
+UIDragDetectorBoundingBehavior Automatic=0 EntireObject=1 HitPoint=2
+UIDragDetectorDragRelativity Absolute=0 Relative=1
+UIDragDetectorDragSpace Parent=0 LayerCollector=1 Reference=2
+UIDragDetectorDragStyle TranslatePlane=0 TranslateLine=1 Rotate=2 Scriptable=3
+UIDragDetectorResponseStyle Offset=0 Scale=1 CustomOffset=2 CustomScale=3
+UIDragSpeedAxisMapping XY=0 XX=1 YY=2
+UIFlexAlignment None=0 Fill=1 SpaceAround=2 SpaceBetween=3 SpaceEvenly=4
+UIFlexMode None=0 Grow=1 Shrink=2 Fill=3 Custom=4
+VerticalAlignment Center=0 Top=1 Bottom=2
+VerticalScrollBarPosition Right=0 Left=1
+VideoSampleSize Small=0 Medium=1 Large=2 Full=3
+ZIndexBehavior Global=0 Sibling=1

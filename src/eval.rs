@@ -62,6 +62,8 @@ pub struct OutRule {
     pub tokens: Vec<Token>,
     /// The `@layer` the rule is in, outermost first; empty when it isn't in one.
     pub layer: Vec<String>,
+    /// The theme the rule is in: `@media (prefers-color-scheme: dark)` → `dark`.
+    pub theme: Option<String>,
     /// Index of the enclosing query container rule, if any.
     pub parent: Option<usize>,
     /// True for Roblox `@Query` container rules.
@@ -98,6 +100,8 @@ pub struct Sheet {
     pub layers: Vec<Vec<String>>,
     /// `@font-face` family names and the font assets they stand for.
     pub font_faces: Vec<(String, String)>,
+    /// Themes, in the order they first appear, with the tokens each one sets.
+    pub themes: Vec<(String, Vec<Token>)>,
     /// Every file read during compilation (for `--watch`).
     pub files: Vec<PathBuf>,
 }
@@ -202,6 +206,8 @@ pub struct Evaluator<'a> {
     container: Option<usize>,
     /// The `@layer` being evaluated, outermost first.
     layer: Vec<String>,
+    /// The theme being evaluated (`@media (prefers-color-scheme: dark)`).
+    theme: Option<String>,
     content: Option<Rc<ContentClosure>>,
     /// Prefix for nested properties (`font: { family: x }` → `font-family`).
     decl_prefix: Option<String>,
@@ -264,6 +270,12 @@ impl Sheet {
         self.rules.append(&mut other.rules);
         self.tokens.append(&mut other.tokens);
         self.font_faces.append(&mut other.font_faces);
+        for (name, mut tokens) in other.themes {
+            match self.themes.iter_mut().find(|(n, _)| *n == name) {
+                Some((_, existing)) => existing.append(&mut tokens),
+                None => self.themes.push((name, tokens)),
+            }
+        }
         for layer in other.layers {
             if !self.layers.contains(&layer) {
                 self.layers.push(layer);
@@ -303,6 +315,7 @@ impl<'a> Evaluator<'a> {
             current_rule: None,
             container: None,
             layer: Vec::new(),
+            theme: None,
             content: None,
             decl_prefix: None,
             in_function: false,
@@ -597,6 +610,7 @@ impl<'a> Evaluator<'a> {
             decls: Vec::new(),
             tokens: Vec::new(),
             layer: self.layer.clone(),
+            theme: self.theme.clone(),
             parent: self.container,
             query: false,
             queries: Vec::new(),
@@ -617,6 +631,14 @@ impl<'a> Evaluator<'a> {
         let parsed = if name.starts_with(|c: char| c.is_ascii_uppercase()) {
             // `@PreferredInputTouch { }`: a built-in query, or a StyleQuery the author defined.
             Ok(vec![query::builtin_by_name(name).map_or_else(|| QueryRef::Named(name.to_string()), QueryRef::Known)])
+        } else if name == "media"
+            && let Some(theme) = color_scheme(&params_text)
+        {
+            let Some(body) = body else { return Ok(()) };
+            let saved = self.theme.replace(theme);
+            let result = self.exec_block(body, &new_env(Some(env.clone()), false));
+            self.theme = saved;
+            return result.map(|_| ());
         } else if name == "layer" {
             return self.layer_rule(&params_text, body, env, span);
         } else if name == "font-face" {
@@ -654,6 +676,7 @@ impl<'a> Evaluator<'a> {
             decls: Vec::new(),
             tokens: Vec::new(),
             layer: Vec::new(),
+            theme: None,
             parent: self.container,
             query: true,
             queries: alternatives,
@@ -670,6 +693,7 @@ impl<'a> Evaluator<'a> {
                 decls: Vec::new(),
                 tokens: Vec::new(),
                 layer: self.layer.clone(),
+                theme: self.theme.clone(),
                 parent: Some(container),
                 query: false,
                 queries: Vec::new(),
@@ -716,6 +740,7 @@ impl<'a> Evaluator<'a> {
                 decls: Vec::new(),
                 tokens: Vec::new(),
                 layer: self.layer.clone(),
+                theme: self.theme.clone(),
                 parent: self.container,
                 query: false,
                 queries: Vec::new(),
@@ -739,6 +764,7 @@ impl<'a> Evaluator<'a> {
             decls: Vec::new(),
             tokens: Vec::new(),
             layer: Vec::new(),
+            theme: None,
             parent: None,
             query: false,
             queries: Vec::new(),
@@ -1628,13 +1654,44 @@ impl<'a> Evaluator<'a> {
             }
         }
 
-        // Placeholders never reach the output; `:root` rules become stylesheet tokens.
+        // Placeholders never reach the output; `:root` rules become stylesheet tokens, and
+        // `[data-theme="dark"]` rules (or `:root` in `@media (prefers-color-scheme: dark)`) a theme's.
         let mut root_tokens = Vec::new();
         for rule in &mut self.sheet.rules {
             if rule.query {
                 continue;
             }
             rule.selector = rule.selector.without_placeholders();
+            if let Some(theme) = rule.theme.clone().or_else(|| rule.selector.theme_name()) {
+                let is_root = rule.selector.is_root() || rule.selector.theme_name().is_some();
+                if is_root && rule.parent.is_none() {
+                    match self.sheet.themes.iter_mut().find(|(n, _)| *n == theme) {
+                        Some((_, tokens)) => tokens.append(&mut rule.tokens),
+                        None => self.sheet.themes.push((theme, std::mem::take(&mut rule.tokens))),
+                    }
+                    for decl in rule.decls.drain(..) {
+                        self.diag.warn(
+                            format!(
+                                "property \"{}\" in a theme is ignored (a theme only sets --custom-properties)",
+                                decl.name
+                            ),
+                            Some(&decl.span),
+                        );
+                    }
+                } else {
+                    self.diag.warn(
+                        format!(
+                            "`{}` depends on the theme `{theme}`, but only `:root` custom properties can (ignored)",
+                            rule.selector.to_css()
+                        ),
+                        Some(&rule.span),
+                    );
+                    rule.decls.clear();
+                    rule.tokens.clear();
+                }
+                rule.selector = SelectorList::default();
+                continue;
+            }
             if rule.selector.is_root() && rule.parent.is_none() {
                 root_tokens.append(&mut rule.tokens);
                 for decl in rule.decls.drain(..) {
@@ -1652,6 +1709,19 @@ impl<'a> Evaluator<'a> {
         self.sheet.tokens.extend(root_tokens);
         Ok(self.sheet)
     }
+}
+
+/// `(prefers-color-scheme: dark)` (optionally after `screen and`): the theme it selects.
+fn color_scheme(params: &str) -> Option<String> {
+    let lower = params.trim().to_ascii_lowercase();
+    let condition = ["only screen and ", "screen and ", "all and "]
+        .iter()
+        .find_map(|p| lower.strip_prefix(p))
+        .unwrap_or(&lower)
+        .trim();
+    let inner = condition.strip_prefix('(')?.strip_suffix(')')?;
+    let (feature, value) = inner.split_once(':')?;
+    (feature.trim() == "prefers-color-scheme").then(|| value.trim().to_string()).filter(|v| !v.is_empty())
 }
 
 fn qualified(ns: Option<&str>, name: &str) -> String {
