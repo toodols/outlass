@@ -12,6 +12,7 @@ mod roblox;
 mod selector;
 mod value;
 
+use std::collections::HashMap;
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -198,6 +199,12 @@ struct BuildArgs {
     /// What to generate
     #[arg(long, value_enum, default_value_t = Emit::Luau)]
     emit: Emit,
+
+    /// A JSON file mapping each CollectionService tag (or `#Name`) to the GuiObject classes it's used
+    /// on, e.g. `{"avatar": ["ImageLabel"], "card": ["Frame"]}`. Rules then drop the properties
+    /// those classes don't have, and warn about the ones written for them
+    #[arg(long, value_name = "FILE")]
+    tags: Option<PathBuf>,
 
     /// Let `luau("...")` insert raw Luau into the generated code. Raw Luau can do anything a script
     /// can, so only allow it for stylesheets you trust; without it, the output can only build a
@@ -399,18 +406,118 @@ fn eval_options(args: &BuildArgs) -> Result<Options, String> {
     Ok(Options { load_paths: args.load_paths.clone(), defines })
 }
 
-fn codegen_options(args: &BuildArgs, sheet_name: &str, header: Option<String>) -> CodegenOptions {
+/// Reads `--tags`: a JSON object from each tag (or `#Name`) to a list of GuiObject class names.
+fn read_tags(args: &BuildArgs) -> Result<HashMap<String, Vec<String>>, String> {
+    let Some(path) = &args.tags else { return Ok(HashMap::new()) };
+    let text = std::fs::read_to_string(path).map_err(|e| format!("can't read {}: {e}", path.display()))?;
+    let tags = parse_tags(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    for (tag, classes) in &tags {
+        if let Some(class) = classes.iter().find(|c| !codegen::GUI_OBJECT_CLASSES.contains(&c.as_str())) {
+            return Err(format!(
+                "{}: `{tag}` lists `{class}`, which isn't one of {}",
+                path.display(),
+                codegen::GUI_OBJECT_CLASSES.join(", ")
+            ));
+        }
+    }
+    Ok(tags)
+}
+
+/// `{"tag": ["Class", ...], ...}`; a single class may be a plain string.
+fn parse_tags(text: &str) -> Result<HashMap<String, Vec<String>>, String> {
+    let mut chars = text.chars().peekable();
+    let skip_ws = |chars: &mut std::iter::Peekable<std::str::Chars>| {
+        while chars.next_if(|c| c.is_whitespace()).is_some() {}
+    };
+    fn string(chars: &mut std::iter::Peekable<std::str::Chars>) -> Result<String, String> {
+        if chars.next() != Some('"') {
+            return Err("expected a string".into());
+        }
+        let mut s = String::new();
+        loop {
+            match chars.next().ok_or("unterminated string")? {
+                '"' => return Ok(s),
+                '\\' => match chars.next().ok_or("unterminated string")? {
+                    'u' => {
+                        let hex: String = chars.by_ref().take(4).collect();
+                        let code = u32::from_str_radix(&hex, 16).map_err(|_| "bad \\u escape")?;
+                        s.push(char::from_u32(code).ok_or("bad \\u escape")?);
+                    }
+                    'n' => s.push('\n'),
+                    't' => s.push('\t'),
+                    c => s.push(c),
+                },
+                c => s.push(c),
+            }
+        }
+    }
+    let mut tags = HashMap::new();
+    skip_ws(&mut chars);
+    if chars.next() != Some('{') {
+        return Err("expected a JSON object".into());
+    }
+    skip_ws(&mut chars);
+    if chars.next_if_eq(&'}').is_none() {
+        loop {
+            skip_ws(&mut chars);
+            let tag = string(&mut chars)?;
+            skip_ws(&mut chars);
+            if chars.next() != Some(':') {
+                return Err(format!("expected `:` after \"{tag}\""));
+            }
+            skip_ws(&mut chars);
+            let mut classes = Vec::new();
+            if chars.next_if_eq(&'[').is_some() {
+                skip_ws(&mut chars);
+                if chars.next_if_eq(&']').is_none() {
+                    loop {
+                        skip_ws(&mut chars);
+                        classes.push(string(&mut chars)?);
+                        skip_ws(&mut chars);
+                        match chars.next() {
+                            Some(',') => {}
+                            Some(']') => break,
+                            _ => return Err(format!("expected `,` or `]` in the list for \"{tag}\"")),
+                        }
+                    }
+                }
+            } else {
+                classes.push(string(&mut chars)?);
+            }
+            tags.insert(tag, classes);
+            skip_ws(&mut chars);
+            match chars.next() {
+                Some(',') => {}
+                Some('}') => break,
+                _ => return Err("expected `,` or `}`".into()),
+            }
+        }
+    }
+    skip_ws(&mut chars);
+    if chars.next().is_some() {
+        return Err("unexpected text after the object".into());
+    }
+    Ok(tags)
+}
+
+fn codegen_options(
+    args: &BuildArgs,
+    sheet_name: &str,
+    header: Option<String>,
+    tags: &HashMap<String, Vec<String>>,
+) -> CodegenOptions {
     let values = ValueOptions { allow_raw_luau: args.allow_raw_luau };
     CodegenOptions {
         approx: ApproxOptions { groups: Group::expand(&args.approx), strict: args.strict },
         values,
         sheet_name: sheet_name.to_string(),
         header,
+        tags: tags.clone(),
     }
 }
 
 /// Compiles one job. Returns the files it read (for --watch) and whether it succeeded.
-fn run_job(job: &Job, args: &BuildArgs, opts: &Options) -> (Vec<PathBuf>, bool) {
+fn run_job(job: &Job, args: &BuildArgs, opts: &Options, tags: &HashMap<String, Vec<String>>) -> (Vec<PathBuf>, bool) {
     let mut diag = Diagnostics::default();
     let mut combined = Sheet::default();
     let mut files = Vec::new();
@@ -453,8 +560,10 @@ fn run_job(job: &Job, args: &BuildArgs, opts: &Options) -> (Vec<PathBuf>, bool) 
             .collect::<Vec<_>>()
             .join(", ");
     let output = match args.emit {
-        Emit::Luau => codegen::emit_luau(&combined, &codegen_options(args, &job.sheet_name, Some(label)), &mut diag),
-        Emit::Json => codegen::emit_json(&combined, &codegen_options(args, &job.sheet_name, None), &mut diag),
+        Emit::Luau => {
+            codegen::emit_luau(&combined, &codegen_options(args, &job.sheet_name, Some(label), tags), &mut diag)
+        }
+        Emit::Json => codegen::emit_json(&combined, &codegen_options(args, &job.sheet_name, None, tags), &mut diag),
         Emit::Css => codegen::emit_css(&combined),
     };
     print_diagnostics(&diag, args);
@@ -528,14 +637,15 @@ fn build(args: &BuildArgs) -> ExitCode {
         );
     }
     let opts = eval_options(args).unwrap_or_else(|e| usage_error(e));
+    let mut tags = read_tags(args).unwrap_or_else(|e| usage_error(e));
     if args.watch && jobs.iter().any(|j| j.inputs.iter().any(|i| i.as_os_str().is_empty())) {
         usage_error("--watch can't be used with stdin input".into());
     }
 
     let mut all_ok = true;
-    let mut watched: Vec<(PathBuf, Option<SystemTime>)> = Vec::new();
+    let mut watched: Vec<(PathBuf, Option<SystemTime>)> = args.tags.iter().map(|p| (p.clone(), mtime(p))).collect();
     for job in &jobs {
-        let (files, ok) = run_job(job, args, &opts);
+        let (files, ok) = run_job(job, args, &opts, &tags);
         all_ok &= ok;
         watched.extend(files.into_iter().map(|f| {
             let t = mtime(&f);
@@ -554,9 +664,14 @@ fn build(args: &BuildArgs) -> ExitCode {
         }
         // Re-expand globs so new files are picked up.
         let jobs = plan(args).unwrap_or_default();
+        match read_tags(args) {
+            Ok(t) => tags = t,
+            Err(e) => eprintln!("error: {e} (keeping the previous tags)"),
+        }
         watched.clear();
+        watched.extend(args.tags.iter().map(|p| (p.clone(), mtime(p))));
         for job in &jobs {
-            let (files, _) = run_job(job, args, &opts);
+            let (files, _) = run_job(job, args, &opts, &tags);
             watched.extend(files.into_iter().map(|f| {
                 let t = mtime(&f);
                 (f, t)
@@ -572,6 +687,19 @@ fn mtime(path: &Path) -> Option<SystemTime> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tags_files_are_json_objects_of_class_lists() {
+        let tags =
+            parse_tags(" {\"a\": [\"Frame\", \"TextLabel\"], \"#B\": \"ImageLabel\", \"c\\u0021\": []} ").unwrap();
+        assert_eq!(tags["a"], vec!["Frame", "TextLabel"]);
+        assert_eq!(tags["#B"], vec!["ImageLabel"]);
+        assert!(tags["c!"].is_empty());
+        assert!(parse_tags("{}").unwrap().is_empty());
+        for bad in ["", "[]", "{\"a\": [\"Frame\"", "{\"a\" [\"Frame\"]}", "{\"a\": 1}", "{} x"] {
+            assert!(parse_tags(bad).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn cli_definition_is_consistent() {

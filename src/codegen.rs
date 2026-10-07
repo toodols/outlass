@@ -27,6 +27,8 @@ pub struct CodegenOptions {
     pub sheet_name: String,
     /// Source description for the header comment; `None` omits the header.
     pub header: Option<String>,
+    /// `--tags`: CollectionService tag (or `#Name`) → the GuiObject classes it's used on.
+    pub tags: HashMap<String, Vec<String>>,
 }
 
 fn set<T>(list: &mut Vec<(String, T)>, key: String, value: T) {
@@ -537,6 +539,11 @@ pub fn lower(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -> lu
             let part = &part;
             let inherited = inherited_decls(sheet, idx);
             let mut lowered = lower_rule(part, &inherited, &tokens, selector.clone(), priority, opts, diag);
+            if let Some(classes) = rule.selector.subject_classes(&opts.tags)
+                && let Some(main) = lowered.iter_mut().find(|r| !r.selector.contains("::"))
+            {
+                drop_missing_properties(main, part, &classes, opts, diag);
+            }
             if !hides_anything {
                 drop_generated_visible(part, &mut lowered);
             }
@@ -662,7 +669,7 @@ pub fn lower(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -> lu
 
 /// The GuiObject classes a stylesheet can select, used for the user-agent defaults. Every one of
 /// them starts out 0x0.
-const GUI_OBJECT_CLASSES: &[&str] = &[
+pub const GUI_OBJECT_CLASSES: &[&str] = &[
     "Frame",
     "TextLabel",
     "TextButton",
@@ -1161,6 +1168,88 @@ fn inherited_text_rules(
     }
     found.sort_by(|a, b| a.0.total_cmp(&b.0));
     found.into_iter().enumerate().map(|(rank, (_, rule))| Rule { priority: Some(rank as f64 + 1.0), ..rule }).collect()
+}
+
+/// The classes that have a property, for the properties only some GuiObject classes have; `None`
+/// for one every GuiObject has, or one outlass doesn't know.
+fn property_owners(property: &str) -> Option<&'static [&'static str]> {
+    const TEXT: &[&str] = &["TextLabel", "TextButton", "TextBox"];
+    const IMAGE: &[&str] = &["ImageLabel", "ImageButton"];
+    Some(match property {
+        "Text"
+        | "TextColor3"
+        | "TextTransparency"
+        | "TextSize"
+        | "TextScaled"
+        | "TextWrapped"
+        | "TextTruncate"
+        | "TextXAlignment"
+        | "TextYAlignment"
+        | "FontFace"
+        | "Font"
+        | "LineHeight"
+        | "RichText"
+        | "TextStrokeColor3"
+        | "TextStrokeTransparency"
+        | "MaxVisibleGraphemes" => TEXT,
+        "PlaceholderColor3" | "PlaceholderText" | "ClearTextOnFocus" | "MultiLine" | "TextEditable" => &["TextBox"],
+        "Image" | "ImageColor3" | "ImageTransparency" | "ImageRectOffset" | "ImageRectSize" | "ScaleType"
+        | "TileSize" | "SliceCenter" | "SliceScale" | "ResampleMode" => IMAGE,
+        "HoverImage" | "PressedImage" => &["ImageButton"],
+        "AutoButtonColor" | "Modal" => &["TextButton", "ImageButton"],
+        "CanvasSize"
+        | "AutomaticCanvasSize"
+        | "CanvasPosition"
+        | "ScrollingEnabled"
+        | "ScrollingDirection"
+        | "ScrollBarThickness"
+        | "ScrollBarImageColor3"
+        | "ScrollBarImageTransparency"
+        | "VerticalScrollBarInset"
+        | "HorizontalScrollBarInset"
+        | "ElasticBehavior" => &["ScrollingFrame"],
+        "GroupTransparency" | "GroupColor3" => &["CanvasGroup"],
+        _ => return None,
+    })
+}
+
+/// With `--tags`, a rule whose elements can only be certain classes keeps only the properties
+/// those classes have. A Roblox property written out, or a CSS declaration none of whose
+/// properties are left, is warned about; an inherited text property isn't, since it still styles
+/// the text inside.
+fn drop_missing_properties(
+    main: &mut Rule,
+    rule: &OutRule,
+    classes: &[String],
+    opts: &CodegenOptions,
+    diag: &mut Diagnostics,
+) {
+    let has = |property: &str| {
+        property_owners(property).is_none_or(|owners| classes.iter().any(|c| owners.contains(&c.as_str())))
+    };
+    let which = if classes.is_empty() { "nothing".to_string() } else { classes.join(" or ") };
+    for d in &rule.decls {
+        let dropped: Vec<String> = if is_css_property(&d.name) {
+            if is_inherited(&d.name) {
+                continue;
+            }
+            let alone = approx::translate(&[to_decl(d)], &opts.approx, &mut Diagnostics::default()).props;
+            if alone.is_empty() || alone.iter().any(|(p, _)| has(p)) {
+                continue;
+            }
+            alone.into_iter().map(|(p, _)| p).collect()
+        } else if has(&d.name) {
+            continue;
+        } else {
+            vec![d.name.clone()]
+        };
+        diag.warn(
+            format!("`{}` sets {}, which {which} doesn't have (ignored)", d.name, dropped.join(", ")),
+            Some(&d.span),
+        );
+    }
+    main.props.retain(|(p, _)| has(p));
+    main.transitions.retain(|(p, _)| p == "*" || has(p));
 }
 
 /// Marks a property in `own_only`, which only records which properties a rule produces.

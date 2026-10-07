@@ -1,5 +1,7 @@
 //! Selector model: parsing, parent (`&`) resolution, `@extend`, and Roblox serialization.
 
+use std::collections::HashMap;
+
 use crate::diag::{Diagnostics, Span};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -331,6 +333,43 @@ impl SelectorList {
     /// `false` when unsure). `.bar` covers `.bar.left`, `.x .bar:hover` and `.moon` covers `.dawn .moon`.
     pub fn covers(&self, stronger: &SelectorList) -> bool {
         !stronger.0.is_empty() && stronger.0.iter().all(|s| self.0.iter().any(|w| complex_covers(w, s)))
+    }
+
+    /// The GuiObject classes this selector's elements can be: a type selector names one, and
+    /// `tags` (`--tags`) lists the classes each CollectionService tag or `#Name` is used on. `None`
+    /// when an element could be anything, or the rule styles a pseudo-instance.
+    pub fn subject_classes(&self, tags: &HashMap<String, Vec<String>>) -> Option<Vec<String>> {
+        let mut all: Vec<String> = Vec::new();
+        for complex in &self.0 {
+            let Some(Part::Compound(subject)) = complex.last() else { return None };
+            let mut classes: Option<Vec<String>> = None;
+            for simple in subject {
+                let known = match simple {
+                    Simple::PseudoElement(_) => return None,
+                    Simple::Type(t) if t == "GuiButton" => vec!["TextButton".into(), "ImageButton".into()],
+                    Simple::Type(t) if t != "GuiObject" => vec![t.clone()],
+                    Simple::Class(tag) => match tags.get(tag) {
+                        Some(list) => list.clone(),
+                        None => continue,
+                    },
+                    Simple::Id(name) => match tags.get(&format!("#{name}")) {
+                        Some(list) => list.clone(),
+                        None => continue,
+                    },
+                    _ => continue,
+                };
+                classes = Some(match classes {
+                    Some(c) => c.into_iter().filter(|x| known.contains(x)).collect(),
+                    None => known,
+                });
+            }
+            for class in classes? {
+                if !all.contains(&class) {
+                    all.push(class);
+                }
+            }
+        }
+        Some(all)
     }
 
     /// The selector without a final `::name`, when every complex selector in the list ends with one.

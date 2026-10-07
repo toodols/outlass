@@ -1789,3 +1789,40 @@ fn is_and_where_expand_into_selector_lists() {
     assert!(priority_of(&out, "#x >> .e") < priority_of(&out, ".f >> .e"), ":where adds no specificity:\n{out}");
     assert!(!stderr.contains(":is") && !stderr.contains(":where"), "{stderr}");
 }
+
+#[test]
+fn tags_drop_properties_the_tagged_classes_dont_have() {
+    let dir = TempDir::new("tags");
+    let tags = dir.write("tags.json", r##"{ "avatar": ["ImageLabel", "ImageButton"], "card": "Frame" }"##);
+    let input = dir.write(
+        "in.scss",
+        ".card { background-image: url(\"rbxassetid://1\"); color: red; } .avatar { object-fit: cover; opacity: 0.5; color: red; }",
+    );
+    let (code, out, stderr) =
+        run(&[input.to_str().unwrap(), "--approx", "--tags", tags.to_str().unwrap(), "-o", "-"], None);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("`background-image` sets Image, which Frame doesn't have"), "{stderr}");
+    assert!(!stderr.contains("`color`"), "an inherited property styles the text inside:\n{stderr}");
+    assert!(!out.contains("rule(sheet, \".card\""), "nothing is left for .card itself:\n{out}");
+    let avatar = rule_of(&out, ".avatar");
+    assert!(avatar.contains("ScaleType = Enum.ScaleType.Crop") && avatar.contains("ImageTransparency = 0.5"), "{out}");
+    assert!(!avatar.contains("TextColor3") && !avatar.contains("GroupTransparency"), "{out}");
+    assert!(rule_of(&out, ".card >> TextLabel, .card >> TextButton, .card >> TextBox").contains("TextColor3"), "{out}");
+}
+
+#[test]
+fn a_type_selector_narrows_the_classes_without_tags() {
+    let (out, stderr) = compile("Frame.x { Text: \"hi\"; Visible: true; }", &[]);
+    assert!(stderr.contains("`Text` sets Text, which Frame doesn't have"), "{stderr}");
+    assert!(!rule_of(&out, "Frame.x").contains("Text ="), "{out}");
+}
+
+#[test]
+fn tags_must_name_gui_object_classes() {
+    let dir = TempDir::new("bad-tags");
+    let tags = dir.write("tags.json", r#"{ "x": ["Part"] }"#);
+    let input = dir.write("in.scss", ".x { Visible: true; }");
+    let (code, _, stderr) = run(&[input.to_str().unwrap(), "--tags", tags.to_str().unwrap(), "-o", "-"], None);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("`x` lists `Part`"), "{stderr}");
+}

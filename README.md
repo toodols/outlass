@@ -20,6 +20,7 @@ outlass ui.scss --approx
 | `-I, --load-path DIR` | Extra directory for `@use`/`@forward`/`@import` |
 | `-D, --define NAME=VALUE` | Set a global variable, overriding `!default` |
 | `--emit luau\|json\|css` | `json` writes the compiled StyleSheet (rules and typed values) the Luau is generated from. `css` prints the evaluated SCSS before Roblox translation, for debugging |
+| `--tags FILE` | JSON mapping each tag (or `#Name`) to the GuiObject classes it's used on, so rules drop and warn about properties those classes don't have |
 | `--allow-raw-luau` | Let `luau("...")` insert raw Luau. Off by default, so the output can only build a StyleSheet |
 | `-w, --watch` | Recompile when an input or anything it imports changes |
 | `-q, --quiet` | Hide warnings and `@debug` |

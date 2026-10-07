@@ -324,6 +324,39 @@ is a 100% width with a 300px `::UISizeConstraint`. `font-size: clamp(12px, 2vw, 
 the background and border `.a` gives it, and leaves a transparent background transparent. A rule that
 sets `opacity` without any known background leaves `BackgroundTransparency` alone.
 
+### Element classes (`--tags`)
+
+A selector like `.avatar` doesn't say what kind of element it styles, so outlass emits every property a
+declaration produces: `opacity` sets `GroupTransparency`, `TextTransparency` and `ImageTransparency`
+at once, and `background-image: url(...)` sets `Image` even on a tag only ever put on Frames. `--tags`
+names the classes each CollectionService tag (or `#Name`) is used on:
+
+```json
+{ "avatar": ["ImageLabel", "ImageButton"], "card": "Frame", "#Search": ["TextBox"] }
+```
+
+A rule then keeps only the properties its elements' classes have, and warns about a Roblox property, or a
+CSS declaration, that would do nothing (`` `background-image` sets Image, which Frame doesn't have ``).
+Inherited text properties are exempt: `.card { color: white }` still colours the text inside the card.
+A type selector narrows the classes the same way, with or without the file (`Frame.card`), and an
+element with several tags can only be the classes they share. This prints the table for a place, from
+Studio's command bar:
+
+```lua
+local tags = {}
+for _, gui in game:GetService("StarterGui"):GetDescendants() do
+	if gui:IsA("GuiObject") then
+		for _, tag in gui:GetTags() do
+			tags[tag] = tags[tag] or {}
+			if not table.find(tags[tag], gui.ClassName) then
+				table.insert(tags[tag], gui.ClassName)
+			end
+		end
+	end
+end
+print(game:GetService("HttpService"):JSONEncode(tags))
+```
+
 ### `--strict`
 
 Some CSS compiles fine but lays out differently in Roblox than in a browser, because Roblox has no
@@ -403,4 +436,4 @@ outlass functions [FILTER]
 ```
 
 Common options: `-o FILE|-`, `-d DIR`, `--merge`, `--approx[=GROUPS]`, `-I DIR`, `-D name=value`,
-`--emit luau|json|css`, `--allow-raw-luau`, `--watch`, `-q`, `--strict`, `--deny-warnings`. See `outlass --help` for everything, with examples.
+`--emit luau|json|css`, `--tags FILE`, `--allow-raw-luau`, `--watch`, `-q`, `--strict`, `--deny-warnings`. See `outlass --help` for everything, with examples.
