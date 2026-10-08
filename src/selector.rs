@@ -527,11 +527,15 @@ fn complex_to_string(complex: &Complex, roblox: bool, ctx: &mut WarnCtx) -> Stri
                             }
                         }
                         Simple::Type(n) => s.push_str(n),
+                        // Every element is a GuiObject, and a class selector matches by IsA (measured
+                        // in Studio), so `*` is `GuiObject`. Next to a type, tag or name it adds
+                        // nothing: `*.a` is `.a`.
+                        Simple::Universal if !roblox => s.push('*'),
                         Simple::Universal => {
-                            if roblox {
-                                warn(ctx, "the universal selector \"*\" is not supported by Roblox selectors".into());
+                            if !compound.iter().any(|s| matches!(s, Simple::Type(_) | Simple::Class(_) | Simple::Id(_)))
+                            {
+                                s.push_str("GuiObject");
                             }
-                            s.push('*');
                         }
                         Simple::Class(n) => {
                             s.push('.');

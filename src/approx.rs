@@ -223,8 +223,9 @@ pub static PROPERTIES: &[PropDoc] = &[
     PropDoc {
         css: "background",
         group: Group::Color,
-        roblox: "BackgroundColor3/BackgroundTransparency or UIGradient (::UIGradient)",
-        notes: "a solid color, a linear-gradient(), or a repeating-linear-gradient() painted over the color",
+        roblox: "BackgroundColor3/BackgroundTransparency, UIGradient (::UIGradient), Image",
+        notes: "a solid color, a linear-gradient(), or a repeating-linear-gradient() painted over the color; a url() \
+                layer sets the picture with its size and repeat, like background-image",
     },
     PropDoc {
         css: "background-image",
@@ -768,6 +769,23 @@ fn desugar(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics) -> (Vec
     let is_none = |v: &Value| v.as_str().is_some_and(|s| s.eq_ignore_ascii_case("none"));
     let px = |v: &Value| v.as_number().and_then(length_px);
 
+    // `background: url(…) no-repeat center / cover`: the shorthand's picture becomes the
+    // longhands it stands for, right after it, so a later longhand still overrides them.
+    if opts.groups.contains(&Group::Color) {
+        let mut expanded = Vec::with_capacity(out.len());
+        let mut picture_before = false;
+        for d in out {
+            let longhands =
+                if d.name == "background" { background_longhands(&d, picture_before, diag) } else { Vec::new() };
+            if matches!(d.name.as_str(), "background" | "background-image") {
+                picture_before = layers(&d.value).iter().any(|l| space_items(l).iter().any(is_url));
+            }
+            expanded.push(d);
+            expanded.extend(longhands);
+        }
+        out = expanded;
+    }
+
     // CSS applies `translate`, then `rotate`, then `scale`, then `transform`.
     if opts.groups.contains(&Group::Position) {
         let mut functions = Vec::new();
@@ -1001,6 +1019,12 @@ fn translate_border_image(decls: &[Decl], diag: &mut Diagnostics, out: &mut Tran
         return;
     };
     out.set_prop("Image", luau::Value::String(id));
+    if let Some(bg) = last(decls, "background-image").filter(|bg| layers(&bg.value).iter().any(is_url)) {
+        diag.warn(
+            "Roblox has one Image, so the `border-image` is drawn and the background picture under it isn't",
+            bg.span.as_ref(),
+        );
+    }
     let slice = slice.unwrap_or_default();
     let fill = slice.iter().any(|v| v.as_str().is_some_and(|s| s.eq_ignore_ascii_case("fill")));
     let numbers: Vec<&Number> = slice.iter().filter_map(Value::as_number).collect();
@@ -1440,12 +1464,12 @@ fn layers(v: &Value) -> Vec<Value> {
 
 /// The layer a UIGradient would draw: the topmost gradient of the stack.
 fn top_gradient(v: &Value) -> Option<Value> {
-    layers(v).into_iter().find(is_gradient_call)
+    layers(v).iter().flat_map(space_items).find(is_gradient_call)
 }
 
 /// The layer BackgroundColor3 would hold: the bottom-most flat color of the stack.
 fn bottom_solid(v: &Value) -> Option<Value> {
-    layers(v).into_iter().rev().find(is_solid_bg_value)
+    layers(v).iter().rev().find_map(|l| space_items(l).into_iter().find(is_solid_bg_value))
 }
 
 /// The gradients a UIGradient can draw: `linear-gradient()` and, written out stop by stop,
@@ -1700,6 +1724,65 @@ fn translate_color_opacity(
         // On a CanvasGroup this fades the element and its children together, exactly like CSS opacity.
         out.set_prop("GroupTransparency", t);
     }
+}
+
+fn is_url(v: &Value) -> bool {
+    matches!(v, Value::Call { name, .. } if name == "url")
+}
+
+/// The longhands a `background` shorthand sets for its picture: `background-image`, and the
+/// `background-size` and `background-repeat` it resets (to `auto` and `repeat`) unless it gives
+/// them. A shorthand without a picture clears one an earlier declaration set.
+fn background_longhands(d: &Decl, picture_before: bool, diag: &mut Diagnostics) -> Vec<Decl> {
+    let decl = |name: &str, value: Value| Decl { name: name.to_string(), value, span: d.span.clone() };
+    let Some(layer) = layers(&d.value).into_iter().find(|l| space_items(l).iter().any(is_url)) else {
+        return if picture_before { vec![decl("background-image", Value::str("none"))] } else { Vec::new() };
+    };
+    let mut image = None;
+    let mut size = Value::str("auto");
+    let mut repeat = Value::str("repeat");
+    let mut positioned = false;
+    let mut lost_size = false;
+    for item in space_items(&layer) {
+        match &item {
+            v if is_url(v) => image = Some(item.clone()),
+            Value::Str { text, quoted: false } => {
+                let lower = text.to_ascii_lowercase();
+                let position = |p: &str| matches!(p, "left" | "right" | "top" | "bottom");
+                if let Some((before, after)) = lower.split_once('/') {
+                    positioned |= position(before);
+                    size = Value::str(after);
+                } else if matches!(lower.as_str(), "repeat" | "no-repeat" | "repeat-x" | "repeat-y" | "space" | "round")
+                {
+                    repeat = item.clone();
+                } else {
+                    positioned |= position(&lower);
+                }
+            }
+            // `0 0 / 32px 32px` reaches here divided (`0 / 32px`), and the size can't be recovered.
+            Value::Number(n) if !n.denom.is_empty() => lost_size = true,
+            Value::Number(n) => positioned |= n.value != 0.0,
+            _ => {}
+        }
+    }
+    if positioned {
+        diag.warn(
+            "`background`: a picture's position has no Roblox equivalent (a cropped or fitted picture is centered, a \
+             tiled one starts at the top left)",
+            d.span.as_ref(),
+        );
+    }
+    if lost_size {
+        diag.warn(
+            "`background`: outlass reads `/` between numbers as division, so the size after it is lost; set \
+             `background-size` instead",
+            d.span.as_ref(),
+        );
+    }
+    let mut out = vec![decl("background-image", image.unwrap_or_else(|| Value::str("none")))];
+    out.push(decl("background-size", size));
+    out.push(decl("background-repeat", repeat));
+    out
 }
 
 /// Whether the element draws a picture: a `url()` background or a border image.

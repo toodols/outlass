@@ -1705,6 +1705,57 @@ fn raw_luau_never_goes_into_json_or_a_model_file() {
 }
 
 #[test]
+fn the_universal_selector_is_every_gui_object() {
+    // A class selector matches by IsA (measured in Studio), so `*` is `GuiObject`; next to a tag,
+    // name or type it adds nothing, as in CSS.
+    let (out, stderr) = compile(
+        "* { ZIndex: 1; } .a > * { ZIndex: 2; } .b *:hover { ZIndex: 3; } *.c { ZIndex: 4; } *::UICorner { CornerRadius: UDim.new(0, 4); }",
+        &[],
+    );
+    assert!(!stderr.contains("universal"), "{stderr}");
+    for selector in ["GuiObject", ".a > GuiObject", ".b >> GuiObject:Hover", ".c", "GuiObject::UICorner"] {
+        rule_of(&out, selector);
+    }
+    assert!(!out.contains('*'), "{out}");
+    // The debug CSS keeps it.
+    let (css, _) = compile(".a > * { ZIndex: 2; }", &["--emit", "css"]);
+    assert!(css.contains(".a > *"), "{css}");
+}
+
+#[test]
+fn the_background_shorthand_draws_its_picture() {
+    let (out, stderr) = compile(
+        r#".c { background: url("rbxassetid://1") no-repeat center / cover; }
+           .h { background: #fff url("rbxassetid://1"); }
+           .k { background: url("rbxassetid://1"); background-size: contain; }
+           .n { background: linear-gradient(red, blue) no-repeat; }
+           .o { background-image: url("rbxassetid://1"); background: red; }"#,
+        &["--approx"],
+    );
+    let c = rule_of(&out, ".c");
+    assert!(c.contains(r#"["Image"] = "rbxassetid://1""#) && c.contains("Enum.ScaleType.Crop"), "{out}");
+    // The color in the same layer still paints the background.
+    let h = rule_of(&out, ".h");
+    assert!(h.contains("Color3.fromRGB(255, 255, 255)") && h.contains(r#"["Image"]"#), "{out}");
+    // A longhand after the shorthand overrides it.
+    assert!(rule_of(&out, ".k").contains("Enum.ScaleType.Fit"), "{out}");
+    assert!(out.contains("\".n::UIGradient\""), "{out}");
+    // A shorthand without a picture clears one set before it.
+    assert!(rule_of(&out, ".o").contains(r#"["Image"] = """#), "{out}");
+    assert!(!stderr.contains("warning"), "{stderr}");
+}
+
+#[test]
+fn a_border_image_hides_the_background_picture_with_a_warning() {
+    let (out, stderr) = compile(
+        r#".e { background-image: url("rbxassetid://1"); border-image: url("rbxassetid://2#96x96") 32 fill; }"#,
+        &["--approx"],
+    );
+    assert!(rule_of(&out, ".e").contains(r#"["Image"] = "rbxassetid://2""#), "{out}");
+    assert!(stderr.contains("Roblox has one Image"), "{stderr}");
+}
+
+#[test]
 fn roblox_constructors_become_typed_values() {
     let (out, stderr) = compile(
         ".a { Size: UDim2.fromScale(1, 0.5); Position: UDim2.fromOffset(4, 8); BackgroundColor3: Color3.new(1, 0, 0); \

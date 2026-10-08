@@ -61,6 +61,7 @@ Put it in a ModuleScript and apply it with a `StyleLink` under your `ScreenGui`.
 | SCSS | Roblox |
 | --- | --- |
 | `Frame`, `.Tag`, `#Name`, `::UICorner` | same selector syntax |
+| `*` | `GuiObject`, which matches every element (a class selector matches by `IsA`); next to a type, tag or name it's dropped (`*.a` → `.a`) |
 | `a b` (descendant) | `a >> b` |
 | `:hover` / `:active` / `:disabled` | `:Hover` / `:Press` / `:NonInteractable` |
 | `:is(...)`, `:where(...)` | expanded into a selector list (`.a:is(.b, .c)` → `.a.b, .a.c`); `:where` adds no specificity |

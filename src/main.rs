@@ -25,8 +25,8 @@ defaults, rest args and @content (including `using`), @function/@return, @if/@el
 the built-in module functions (see `outlass functions`).
 
 Roblox mapping:
-  * Selectors: `Frame`, `.Tag`, `#Name`, `::UICorner`; the descendant combinator (space) \
-becomes `>>`; :hover → :Hover, :active → :Press, :disabled → :NonInteractable.
+  * Selectors: `Frame`, `.Tag`, `#Name`, `::UICorner`; `*` → `GuiObject`; the descendant \
+combinator (space) becomes `>>`; :hover → :Hover, :active → :Press, :disabled → :NonInteractable.
   * Declarations with PascalCase names are Roblox properties. Their values are Roblox values \
 (Enum.Font.Gotham, UDim2.new(0, 10, 0, 20), Color3.fromRGB(...), colors like #fff, quoted \
 strings, numbers; px is dropped, 50% → 0.5, 1s/1000ms → 1). Anything else is ignored with a \
