@@ -367,6 +367,10 @@ tints it (`ImageColor3`). `border-image: url("rbxassetid://123#96x96") 32 fill` 
 (`ScaleType.Slice` with its `SliceCenter`); Roblox measures the slices in the picture's pixels, so the
 url ends with the picture's size, which a browser ignores and outlass leaves out of the id. Roblox
 always draws the middle, so write `fill`. `border-image-width` scales the slices (`SliceScale`).
+The same `#WxH` ending sizes a background picture: CSS tiles it at its own size unless
+`background-size` says otherwise, and an `auto` side keeps its proportions (`32px auto` of a 64x32
+picture is a 32x16 tile). Without it, or for a percentage next to `auto`, the picture is stretched
+to the element, with a warning. Roblox has one `Image`, so a border image hides a background picture.
 `contain: size` stops an element sizing itself by its content, for one whose size code sets.
 
 `opacity` scales those transparencies rather than replacing them: `.a:hover { opacity: 0.5 }` fades

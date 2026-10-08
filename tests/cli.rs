@@ -1754,10 +1754,41 @@ fn a_background_without_a_picture_clears_another_rules_picture() {
 }
 
 #[test]
+fn a_picture_tiles_at_its_own_size_like_css() {
+    let (out, stderr) = compile(
+        r#".a { background-image: url("rbxassetid://1#64x32"); }
+           .b { background-image: url("rbxassetid://1#64x32"); background-size: 32px; }
+           .c { background-image: url("rbxassetid://1#64x32"); background-size: auto 16px; }
+           .d { background: url("rbxassetid://1#64x32") 0 0 / 32px auto; }"#,
+        &["--approx"],
+    );
+    assert!(rule_of(&out, ".a").contains("UDim2.new(0, 64, 0, 32)"), "{out}");
+    // One value is the width; `auto` keeps the picture's proportions.
+    for selector in [".b", ".c", ".d"] {
+        let rule = rule_of(&out, selector);
+        assert!(rule.contains("Enum.ScaleType.Tile") && rule.contains("UDim2.new(0, 32, 0, 16)"), "{out}");
+    }
+    assert!(!stderr.contains("warning"), "{stderr}");
+    // Without the picture's size, or for a percentage next to `auto`, it's stretched, with a warning.
+    let (out, stderr) = compile(
+        r#".e { background-image: url("rbxassetid://1"); } .f { background-image: url("rbxassetid://1#64x32"); background-size: 50% auto; }"#,
+        &["--approx"],
+    );
+    assert!(
+        rule_of(&out, ".e").contains("Enum.ScaleType.Stretch")
+            && rule_of(&out, ".f").contains("Enum.ScaleType.Stretch")
+    );
+    assert!(
+        stderr.contains("a picture tiles at its own size in CSS") && stderr.contains("TileSize can't express"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn the_background_shorthand_draws_its_picture() {
     let (out, stderr) = compile(
         r#".c { background: url("rbxassetid://1") no-repeat center / cover; }
-           .h { background: #fff url("rbxassetid://1"); }
+           .h { background: #fff url("rbxassetid://1#64x32"); }
            .k { background: url("rbxassetid://1"); background-size: contain; }
            .n { background: linear-gradient(red, blue) no-repeat; }
            .o { background-image: url("rbxassetid://1"); background: red; }"#,
@@ -1946,7 +1977,7 @@ fn tags_drop_properties_the_tagged_classes_dont_have() {
     let (code, out, stderr) =
         run(&[input.to_str().unwrap(), "--approx", "--tags", tags.to_str().unwrap(), "-o", "-"], None);
     assert_eq!(code, 0, "{stderr}");
-    assert!(stderr.contains("`background-image` sets Image, which Frame doesn't have"), "{stderr}");
+    assert!(stderr.contains("`background-image` sets Image, ScaleType, which Frame doesn't have"), "{stderr}");
     assert!(!stderr.contains("`color`"), "an inherited property styles the text inside:\n{stderr}");
     assert!(!out.contains("rule(sheet, \".card\""), "nothing is left for .card itself:\n{out}");
     let avatar = rule_of(&out, ".avatar");
@@ -2188,7 +2219,7 @@ fn text_shadow_is_the_text_stroke() {
 #[test]
 fn url_of_an_expression_is_a_function_call() {
     let (out, stderr) = compile(
-        "$pictures: (\"rbxassetid://1#4x4\", \"rbxassetid://2#4x4\"); $one: \"rbxassetid://3\";          .a { background-image: url(nth($pictures, 2)); } .b { background-image: url($one); }          .c { background-image: url(rbxassetid://4); }",
+        "$pictures: (\"rbxassetid://1#4x4\", \"rbxassetid://2#4x4\"); $one: \"rbxassetid://3#4x4\";          .a { background-image: url(nth($pictures, 2)); } .b { background-image: url($one); }          .c { background-image: url(rbxassetid://4#4x4); }",
         &["--approx"],
     );
     assert!(stderr.is_empty(), "{stderr}");

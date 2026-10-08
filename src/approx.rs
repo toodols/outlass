@@ -263,7 +263,8 @@ pub static PROPERTIES: &[PropDoc] = &[
         css: "background-size",
         group: Group::Color,
         roblox: "ScaleType / TileSize",
-        notes: "for an image: cover → Crop, contain → Fit, a size → Tile at that size",
+        notes: "for an image: cover → Crop, contain → Fit, a size → Tile at that size; `auto` (also the default) \
+                keeps the picture's size or proportions, known from a url ending in its size (#64x32)",
     },
     PropDoc {
         css: "background-repeat",
@@ -947,35 +948,89 @@ fn translate_images(decls: &[Decl], diag: &mut Diagnostics, out: &mut Translated
         }
     }
     let no_repeat = last(decls, "background-repeat").and_then(keyword).is_some_and(|k| k == "no-repeat");
-    if let Some(d) = last(decls, "background-size") {
-        match keyword(d).as_deref() {
-            Some("cover") => out.set_prop("ScaleType", scale_type("Crop")),
-            Some("contain") => out.set_prop("ScaleType", scale_type("Fit")),
-            Some("auto") => {}
+    // The picture's own size, from the `#WxH` its url ends with: what an `auto` size keeps.
+    let background = last(decls, "background-image").filter(|d| has_url(&d.value));
+    let natural = background.and_then(|d| {
+        layers(&d.value).iter().flat_map(space_items).find_map(|v| match v {
+            Value::Call { name, args } if name == "url" => {
+                args.first().and_then(|a| a.as_str()).and_then(|t| picture(t).1)
+            }
+            _ => None,
+        })
+    });
+    // `background-size` (with no declaration, a picture's is `auto`): each axis a (scale, offset)
+    // length, or `None` for `auto`.
+    type Axis = Option<(f64, f64)>;
+    let sized: Option<(Axis, Axis, Option<Span>)> = match last(decls, "background-size") {
+        Some(d) => match keyword(d).as_deref() {
+            Some("cover") => {
+                out.set_prop("ScaleType", scale_type("Crop"));
+                None
+            }
+            Some("contain") => {
+                out.set_prop("ScaleType", scale_type("Fit"));
+                None
+            }
             _ => {
                 let items = space_items(&d.value);
-                let axis = |v: &Value| match v.as_number() {
-                    Some(n) => length_component(n).ok(),
-                    None => None,
+                let axis = |v: &Value| -> Option<Axis> {
+                    if v.as_str().is_some_and(|s| s.eq_ignore_ascii_case("auto")) {
+                        return Some(None);
+                    }
+                    v.as_number().and_then(|n| length_component(n).ok()).map(Some)
                 };
-                let x = items.first().and_then(axis);
-                let y = items.get(1).map_or(x, axis);
-                match (x, y) {
-                    (Some((1.0, 0.0)), Some((1.0, 0.0))) => out.set_prop("ScaleType", scale_type("Stretch")),
-                    (Some(_), Some(_)) if no_repeat => {
-                        diag.warn(
-                            "`background-size` without repeating stretches the image to the element (Roblox can't \
-                             draw it once at a size)",
-                            d.span.as_ref(),
-                        );
-                        out.set_prop("ScaleType", scale_type("Stretch"));
+                // One value is the width; the height is `auto`.
+                match (items.first().and_then(axis), items.get(1).map_or(Some(None), axis)) {
+                    (Some(x), Some(y)) => Some((x, y, d.span.clone())),
+                    _ => {
+                        diag.warn("`background-size`: expected cover, contain or a size (ignored)", d.span.as_ref());
+                        None
                     }
-                    (Some((xs, xo)), Some((ys, yo))) => {
-                        out.set_prop("ScaleType", scale_type("Tile"));
-                        out.set_prop("TileSize", luau::Value::udim2(xs, xo, ys, yo));
-                    }
-                    _ => diag.warn("`background-size`: expected cover, contain or a size (ignored)", d.span.as_ref()),
                 }
+            }
+        },
+        // `object-fit` sizes an image element's own picture instead.
+        None if last(decls, "object-fit").is_none() => background.map(|d| (None, None, d.span.clone())),
+        None => None,
+    };
+    if let Some((x, y, span)) = sized {
+        // An `auto` axis keeps the picture's proportions, which only its size gives, and only for
+        // a length in pixels: a percentage's other axis would follow the element's width.
+        let size = match (x, y, natural) {
+            (Some(x), Some(y), _) => Ok((x, y)),
+            (None, None, Some((w, h))) => Ok(((0.0, w), (0.0, h))),
+            (Some((0.0, ox)), None, Some((w, h))) if w > 0.0 => Ok(((0.0, ox), (0.0, ox * h / w))),
+            (None, Some((0.0, oy)), Some((w, h))) if h > 0.0 => Ok(((0.0, oy * w / h), (0.0, oy))),
+            (_, _, Some(_)) => {
+                Err("`background-size`: a percentage next to `auto` would make one side of the tile follow the other \
+                 side of the element, which Roblox's TileSize can't express; give both sides (stretched to the element)")
+            }
+            (None, None, None) if background.is_some() => Err(
+                "a picture tiles at its own size in CSS (`background-size: auto`), which Roblox only knows from its \
+                 url: end it with the size, as in url(\"rbxassetid://123#64x32\"), or set `background-size` \
+                 (stretched to the element)",
+            ),
+            (_, _, None) => Err(
+                "`background-size: auto` keeps the picture's proportions, which Roblox only knows from its url: end \
+                 it with the size, as in url(\"rbxassetid://123#64x32\") (stretched to the element)",
+            ),
+        };
+        match size {
+            Ok(((1.0, 0.0), (1.0, 0.0))) => out.set_prop("ScaleType", scale_type("Stretch")),
+            Ok(_) if no_repeat => {
+                diag.warn(
+                    "a picture that doesn't repeat is stretched to the element (Roblox can't draw it once at a size)",
+                    span.as_ref(),
+                );
+                out.set_prop("ScaleType", scale_type("Stretch"));
+            }
+            Ok(((xs, xo), (ys, yo))) => {
+                out.set_prop("ScaleType", scale_type("Tile"));
+                out.set_prop("TileSize", luau::Value::udim2(xs, xo, ys, yo));
+            }
+            Err(message) => {
+                diag.warn(message, span.as_ref());
+                out.set_prop("ScaleType", scale_type("Stretch"));
             }
         }
     }
