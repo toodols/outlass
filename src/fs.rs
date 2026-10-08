@@ -52,10 +52,7 @@ impl MemoryFs {
 
 impl FileSystem for MemoryFs {
     fn read_to_string(&self, path: &Path) -> io::Result<String> {
-        self.files
-            .get(&normalize(path))
-            .cloned()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such file"))
+        self.files.get(&normalize(path)).cloned().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such file"))
     }
 
     fn is_file(&self, path: &Path) -> bool {

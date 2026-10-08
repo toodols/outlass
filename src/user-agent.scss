@@ -1,0 +1,72 @@
+// The user-agent stylesheet: defaults that make fresh Roblox elements start out like CSS boxes.
+//
+// outlass compiles this into a StyleSheet that every compiled sheet derives from
+// (`sheet.UserAgent`), so any rule in the sheet beats these whatever their priorities. It's
+// compiled once per build with `$approx-<group>` set to whether that `--approx` group is on: a
+// default only belongs here when the author's CSS can turn it back off, which takes the group that
+// translates the CSS for it.
+//
+// It's translated as the bottom of the cascade: no rule ranks below it, so `fit-content` leaves an
+// element's own Size alone, and inherited properties aren't passed down (every rule here already
+// matches every element it's for). Raw Roblox properties are only for what CSS can't say.
+
+$approx-color: false !default;
+$approx-opacity: false !default;
+$approx-text: false !default;
+$approx-size: false !default;
+$approx-position: false !default;
+$approx-box: false !default;
+$approx-layout: false !default;
+$approx-visibility: false !default;
+$approx-transition: false !default;
+
+TextLabel, TextButton, TextBox {
+  // HTML text is always markup; Roblox text is only with RichText on. CSS has no property for it.
+  RichText: true;
+  // Roblox text runs off the edge of its box unless TextWrapped says otherwise.
+  @if $approx-text {
+    white-space: normal;
+  }
+}
+
+// Roblox centers text both ways. A button is the exception, whose content browsers center too.
+@if $approx-text {
+  TextLabel, TextBox {
+    text-align: start;
+    align-content: start;
+  }
+}
+
+// A ScrollingFrame's canvas is a fixed `{0, 0}, {2, 0}` unless told otherwise; a CSS scroll
+// container's scrollable area is its content.
+@if $approx-visibility {
+  ScrollingFrame {
+    overflow: auto;
+  }
+}
+
+// Roblox darkens a button's background on hover and press by itself; a browser button only changes
+// when a `:hover`/`:active` rule says so. CSS has no property for it.
+@if $approx-color {
+  TextButton, ImageButton {
+    AutoButtonColor: false;
+  }
+}
+
+// Every GuiObject class a stylesheet can select (codegen::GUI_OBJECT_CLASSES; a test keeps the two
+// in step).
+Frame, TextLabel, TextButton, TextBox, ImageLabel, ImageButton, ScrollingFrame, CanvasGroup, VideoFrame,
+ViewportFrame {
+  // A fresh GuiObject is 0x0, where a CSS box with no size given takes one from its content.
+  @if $approx-size {
+    width: fit-content;
+    height: fit-content;
+  }
+  // A fresh GuiObject has an opaque gray background and a 1px legacy border; a CSS box has neither.
+  @if $approx-color {
+    background: transparent;
+  }
+  @if $approx-box {
+    border: none;
+  }
+}

@@ -2,10 +2,13 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::path::Path;
+use std::rc::Rc;
 
 use crate::approx::{self, ApproxOptions, Decl};
 use crate::diag::Diagnostics;
-use crate::eval::{OutDecl, OutRule, Sheet, Token};
+use crate::eval::{self, OutDecl, OutRule, Sheet, Syntax, Token};
+use crate::fs::MemoryFs;
 use crate::luau::{self, Rule};
 use crate::query::Target;
 use crate::roblox::{self, ValueOptions};
@@ -30,6 +33,10 @@ pub struct CodegenOptions {
     pub header: Option<String>,
     /// `--tags`: CollectionService tag (or `#Name`) → the GuiObject classes it's used on.
     pub tags: HashMap<String, Vec<String>>,
+    /// Emit the user-agent stylesheet: defaults (RichText, AutomaticSize, transparent backgrounds,
+    /// ...) that make fresh Roblox elements start out like CSS boxes, in a StyleSheet the sheet
+    /// derives from.
+    pub user_agent_styles: bool,
 }
 
 fn set<T>(list: &mut Vec<(String, T)>, key: String, value: T) {
@@ -563,8 +570,7 @@ fn flex_shrink_defaults(sheet: &Sheet, priorities: &HashMap<(usize, bool), Optio
         } else {
             continue;
         };
-        // Author rules are ranked from 1 up, and the user-agent defaults sit at 0 (none of them
-        // touch a UIFlexItem): these take the same order below 0.
+        // Author rules are ranked from 1 up: these take the same order below them.
         let priority =
             priorities.get(&(idx, false)).or(priorities.get(&(idx, true))).copied().flatten().map(|p| p - top - 1.0);
         let selector = split_selector_list(&rule.selector.to_roblox(&mut Diagnostics::default(), None))
@@ -663,8 +669,10 @@ pub fn lower(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -> lu
     let parts = cascade_parts(sheet);
     let mut priorities = cascade_priorities(sheet, &parts);
     let root_tokens = inline_tokens(sheet);
-    let inherited_text = inherited_text_rules(sheet, &priorities, &root_tokens, opts);
-    // Inherited values rank above the user-agent defaults (0) and below every author rule.
+    // The user-agent sheet's rules match every element directly, so nothing needs passing down.
+    let inherited_text =
+        if opts.approx.user_agent { Vec::new() } else { inherited_text_rules(sheet, &priorities, &root_tokens, opts) };
+    // Inherited values rank below every author rule.
     let offset = inherited_text.len() as f64;
     for p in priorities.values_mut() {
         *p = p.map(|p| p + offset);
@@ -744,101 +752,39 @@ pub fn lower(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -> lu
     let definitions = query_definitions(sheet, diag);
     rules.splice(0..0, definitions);
 
-    // The user-agent stylesheet: defaults below every author rule, like a browser's. Any rule that
-    // sets the same property overrides them (e.g. `RichText: false`).
-    let lowest = 0.0;
     if opts.approx.groups.contains(&approx::Group::Layout) {
         rules.splice(0..0, flex_shrink_defaults(sheet, &priorities));
     }
-    // A fresh GuiObject is 0x0, where a CSS box with no size given takes one from its content.
-    // AutomaticSize is a floor rather than a replacement — it never shrinks an element below its
-    // Size — and `--approx=size` turns every CSS `width`/`height` into Size *and* an explicit
-    // AutomaticSize, so a rule that sizes an element switches this straight back off.
-    let mut gui_defaults = Vec::new();
-    if opts.approx.groups.contains(&approx::Group::Size) {
-        gui_defaults.push(("AutomaticSize".to_string(), luau::Value::enum_item("AutomaticSize", "XY")));
-    }
-    // A CSS box has no background and no border unless given one; a fresh GuiObject has an opaque
-    // gray background and a 1px legacy border. Any rule with a background sets
-    // BackgroundTransparency itself (see the transparency cascade), and any border clears
-    // BorderSizePixel, so these only fill in what CSS leaves unset.
-    if opts.approx.groups.contains(&approx::Group::Color) {
-        gui_defaults.push(("BackgroundTransparency".to_string(), luau::Value::Number(1.0)));
-        gui_defaults.push(("BorderSizePixel".to_string(), luau::Value::Number(0.0)));
-    }
-    if !gui_defaults.is_empty() {
-        rules.insert(
-            0,
-            Rule {
-                selector: GUI_OBJECT_CLASSES.join(", "),
-                priority: Some(lowest),
-                props: gui_defaults,
-                ..Default::default()
-            },
-        );
-    }
-    // Roblox darkens a button's background on hover and press by itself; a browser button only
-    // changes when a `:hover`/`:active` rule says so.
-    if opts.approx.groups.contains(&approx::Group::Color) {
-        rules.insert(
-            0,
-            Rule {
-                selector: "TextButton, ImageButton".to_string(),
-                priority: Some(lowest),
-                props: vec![("AutoButtonColor".to_string(), luau::Value::Bool(false))],
-                ..Default::default()
-            },
-        );
-    }
-    // A CSS scroll container's scrollable area is its content; a ScrollingFrame's canvas is a fixed
-    // `{0, 0}, {2, 0}` unless told otherwise. CanvasSize is a floor under AutomaticCanvasSize, so
-    // it's zeroed rather than left at twice the frame's height.
-    if opts.approx.groups.contains(&approx::Group::Visibility) {
-        rules.insert(
-            0,
-            Rule {
-                selector: "ScrollingFrame".to_string(),
-                priority: Some(lowest),
-                props: vec![
-                    ("AutomaticCanvasSize".to_string(), luau::Value::enum_item("AutomaticSize", "XY")),
-                    ("CanvasSize".to_string(), luau::Value::udim2(0.0, 0.0, 0.0, 0.0)),
-                ],
-                ..Default::default()
-            },
-        );
-    }
-    let mut text_defaults = vec![("RichText".to_string(), luau::Value::Bool(true))];
-    // CSS text wraps unless `white-space: nowrap` says otherwise; Roblox text runs off the edge
-    // unless TextWrapped says otherwise.
-    if opts.approx.groups.contains(&approx::Group::Text) {
-        text_defaults.push(("TextWrapped".to_string(), luau::Value::Bool(true)));
-    }
-    rules.insert(
-        0,
-        Rule {
-            selector: "TextLabel, TextButton, TextBox".to_string(),
-            priority: Some(lowest),
-            props: text_defaults,
-            ..Default::default()
-        },
-    );
-    // CSS text starts at the top left of its box (`text-align: start`); Roblox centers it both
-    // ways. A button is the exception, whose content browsers center too.
-    if opts.approx.groups.contains(&approx::Group::Text) {
-        rules.insert(
-            1,
-            Rule {
-                selector: "TextLabel, TextBox".to_string(),
-                priority: Some(lowest),
-                props: vec![
-                    ("TextXAlignment".to_string(), luau::Value::enum_item("TextXAlignment", "Left")),
-                    ("TextYAlignment".to_string(), luau::Value::enum_item("TextYAlignment", "Top")),
-                ],
-                ..Default::default()
-            },
-        );
-    }
-    luau::Sheet { name: opts.sheet_name.clone(), attributes: sheet_attributes, rules, themes }
+    let user_agent = if opts.user_agent_styles { user_agent_rules(opts) } else { Vec::new() };
+    luau::Sheet { name: opts.sheet_name.clone(), attributes: sheet_attributes, rules, themes, user_agent }
+}
+
+/// The user-agent stylesheet, `user-agent.scss`: defaults below every author rule, like a
+/// browser's. Any rule that sets the same property overrides them (e.g. `RichText: false`), since
+/// these live in a sheet the author's derives from. It's compiled like any stylesheet, with
+/// `$approx-<group>` set for each approximation group.
+pub const USER_AGENT_SCSS: &str = include_str!("user-agent.scss");
+
+fn user_agent_rules(opts: &CodegenOptions) -> Vec<Rule> {
+    let defines = approx::Group::concrete()
+        .iter()
+        .map(|g| (format!("approx-{}", g.name()), Value::Bool(opts.approx.groups.contains(g))))
+        .collect();
+    let eval_opts = eval::Options { defines, fs: Rc::new(MemoryFs::new()), ..eval::Options::default() };
+    let mut diag = Diagnostics::default();
+    let sheet =
+        eval::compile_source(USER_AGENT_SCSS, Path::new("user-agent.scss"), Syntax::Scss, &eval_opts, &mut diag)
+            .unwrap_or_else(|e| panic!("user-agent.scss doesn't compile: {e}"));
+    let ua_opts = CodegenOptions {
+        approx: ApproxOptions { user_agent: true, strict: false, ..opts.approx.clone() },
+        user_agent_styles: false,
+        header: None,
+        tags: HashMap::new(),
+        ..opts.clone()
+    };
+    let rules = lower(&sheet, &ua_opts, &mut diag).rules;
+    debug_assert!(diag.items.is_empty(), "user-agent.scss: {:?}", diag.items);
+    rules
 }
 
 /// The stylesheet's own attributes, and its themes. A sheet's own attribute beats the one on the
@@ -1738,4 +1684,54 @@ pub fn emit_css(sheet: &Sheet) -> String {
         let _ = writeln!(out, "{}}}", "  ".repeat(open.len()));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn options(groups: Vec<approx::Group>) -> CodegenOptions {
+        CodegenOptions {
+            values: ValueOptions { allow_raw_luau: false },
+            approx: ApproxOptions {
+                groups,
+                strict: false,
+                tokens: HashMap::new(),
+                inherited_family: None,
+                user_agent: false,
+            },
+            sheet_name: "test".into(),
+            header: None,
+            tags: HashMap::new(),
+            user_agent_styles: true,
+        }
+    }
+
+    #[test]
+    fn the_user_agent_sheet_styles_every_gui_object_class() {
+        let rules = user_agent_rules(&options(approx::Group::expand(&[approx::Group::All])));
+        let all = GUI_OBJECT_CLASSES.join(", ");
+        assert!(rules.iter().any(|r| r.selector == all), "no `{all}` rule in {rules:?}");
+    }
+
+    #[test]
+    fn the_user_agent_sheet_compiles_cleanly_with_and_without_every_group() {
+        // `user_agent_rules` panics on an error and asserts there are no warnings.
+        let all = user_agent_rules(&options(approx::Group::expand(&[approx::Group::All])));
+        let none = user_agent_rules(&options(Vec::new()));
+        assert_eq!(none.len(), 1, "{none:?}");
+        assert_eq!(none[0].props, vec![("RichText".to_string(), luau::Value::Bool(true))]);
+        assert_eq!(all.len(), 5, "{all:?}");
+    }
+
+    #[test]
+    fn the_user_agent_sheet_sizes_from_content_without_overriding_size() {
+        // Nothing ranks below the user-agent sheet, so `fit-content` needn't zero a weaker Size,
+        // and its text properties aren't copied down to descendants.
+        let rules = user_agent_rules(&options(approx::Group::expand(&[approx::Group::All])));
+        let every_class = rules.iter().find(|r| r.selector == GUI_OBJECT_CLASSES.join(", ")).unwrap();
+        assert!(every_class.props.iter().any(|(k, _)| k == "AutomaticSize"), "{every_class:?}");
+        assert!(rules.iter().all(|r| r.props.iter().all(|(k, _)| k != "Size")), "{rules:?}");
+        assert!(rules.iter().all(|r| !r.selector.contains(">>")), "{rules:?}");
+    }
 }

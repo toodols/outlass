@@ -227,8 +227,7 @@ pub struct Evaluator<'a> {
 }
 
 pub fn compile_file(path: &Path, opts: &Options, diag: &mut Diagnostics) -> Result<Sheet> {
-    let source =
-        opts.fs.read_to_string(path).map_err(|e| Error::new(format!("can't read {}: {e}", path.display())))?;
+    let source = opts.fs.read_to_string(path).map_err(|e| Error::new(format!("can't read {}: {e}", path.display())))?;
     let syntax = Syntax::from_path(path);
     compile_source(&source, path, syntax, opts, diag)
 }
@@ -1864,17 +1863,23 @@ mod tests {
     #[test]
     fn imports_resolve_through_the_options_filesystem() {
         let mut fs = crate::fs::MemoryFs::new();
-        fs.insert("ui/main.scss", "@use \"theme\";
+        fs.insert(
+            "ui/main.scss",
+            "@use \"theme\";
 @import \"../shared/base\";
-Frame { BackgroundColor3: theme.$bg; }");
+Frame { BackgroundColor3: theme.$bg; }",
+        );
         fs.insert("ui/_theme.scss", "$bg: #102030;");
         fs.insert("shared/_base.scss", "TextLabel { TextSize: 14; }");
         let opts = Options { fs: Rc::new(fs), ..Options::default() };
         let mut diag = Diagnostics::default();
         let sheet = compile_file(Path::new("ui/main.scss"), &opts, &mut diag).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(css(&sheet), "TextLabel { TextSize: 14; }
+        assert_eq!(
+            css(&sheet),
+            "TextLabel { TextSize: 14; }
 Frame { BackgroundColor3: #102030; }
-");
+"
+        );
         assert_eq!(sheet.files.len(), 3);
     }
 

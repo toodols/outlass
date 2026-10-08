@@ -172,7 +172,7 @@ fn merge_combines_inputs_into_one_sheet_named_after_output() {
     assert!(content.contains(r#"rule(sheet, ".a", "#), "content:\n{content}");
     assert!(content.contains(r#"rule(sheet, ".b", "#), "content:\n{content}");
     // Only one `local sheet = Instance.new` — a single combined StyleSheet.
-    assert_eq!(content.matches("Instance.new(\"StyleSheet\")").count(), 1, "content:\n{content}");
+    assert_eq!(content.matches("local sheet = Instance.new(\"StyleSheet\")").count(), 1, "content:\n{content}");
 }
 
 // ---------- 5. globs ----------
@@ -1006,10 +1006,10 @@ fn content_and_appearance_map_to_text_and_auto_button_color() {
 #[test]
 fn rich_text_is_on_by_default_below_every_rule() {
     let (out, _) = compile(".plain { RichText: false; }", &[]);
-    assert!(out.contains("rule(sheet, \"TextLabel, TextButton, TextBox\", 0, {\n\tRichText = true,"), "{out}");
+    assert!(rule_of(&out, "TextLabel, TextButton, TextBox").contains("RichText = true,"), "{out}");
     // Text wraps by default, as `white-space: normal` does in CSS.
     let (wrapped, _) = compile(".nowrap { white-space: nowrap; }", &["--approx"]);
-    assert!(wrapped.contains("RichText = true,\n\tTextWrapped = true,"), "{wrapped}");
+    assert!(rule_of(&wrapped, "TextLabel, TextButton, TextBox").contains("TextWrapped = true,"), "{wrapped}");
     assert!(wrapped.contains("TextWrapped = false"), "an author rule must be able to opt out:\n{wrapped}");
     assert!(priority_of(&out, ".plain") > 0.0, "an author rule must override the default:\n{out}");
 }
@@ -1019,13 +1019,11 @@ fn elements_are_content_sized_by_default_and_a_css_size_turns_that_off() {
     // A fresh GuiObject is 0x0, so the user-agent sheet sizes every class from its content, as CSS
     // sizes a box with no width or height of its own.
     let (out, _) = compile(".chip { width: 100px; height: 20px; }\n.grow { width: fit-content; }", &["--approx"]);
-    assert!(
-        out.contains(
-            "rule(sheet, \"Frame, TextLabel, TextButton, TextBox, ImageLabel, ImageButton, \
-             ScrollingFrame, CanvasGroup, VideoFrame, ViewportFrame\", 0, {\n\tAutomaticSize = Enum.AutomaticSize.XY,"
-        ),
-        "{out}"
+    let every_class = rule_of(
+        &out,
+        "Frame, TextLabel, TextButton, TextBox, ImageLabel, ImageButton, ScrollingFrame, CanvasGroup, VideoFrame, ViewportFrame",
     );
+    assert!(every_class.contains("AutomaticSize = Enum.AutomaticSize.XY,"), "{out}");
     assert!(out.contains("Size = UDim2.new(0, 100, 0, 20),\n\tAutomaticSize = Enum.AutomaticSize.None,"), "{out}");
     assert!(rule_of(&out, ".grow").contains("AutomaticSize = Enum.AutomaticSize.XY,"), "{out}");
     // Without the size approximations nothing translates to AutomaticSize, so the default is not
@@ -1200,8 +1198,10 @@ fn unknown_fonts_warn_and_fall_back_like_css() {
 
 /// The body of the StyleRule emitted for exactly this selector.
 fn rule_of<'a>(out: &'a str, selector: &str) -> &'a str {
-    let start =
-        out.find(&format!("rule(sheet, \"{selector}\"")).unwrap_or_else(|| panic!("no `{selector}` rule in:\n{out}"));
+    let start = ["sheet", "userAgent"]
+        .iter()
+        .find_map(|parent| out.find(&format!("rule({parent}, \"{selector}\"")))
+        .unwrap_or_else(|| panic!("no `{selector}` rule in:\n{out}"));
     let rest = &out[start..];
     &rest[..rest.find("\n})").map_or(rest.len(), |i| i + 3)]
 }
@@ -1599,6 +1599,35 @@ fn css_defaults_for_backgrounds_borders_and_text_alignment() {
     let text = rule_of(&out, "TextLabel, TextBox");
     assert!(text.contains("TextXAlignment = Enum.TextXAlignment.Left"), "{out}");
     assert!(text.contains("TextYAlignment = Enum.TextYAlignment.Top"), "{out}");
+}
+
+#[test]
+fn user_agent_rules_live_in_a_stylesheet_the_sheet_derives_from() {
+    // A deriving sheet's rules beat the derived sheet's whatever their priorities (measured in
+    // Studio), so the defaults sit under every author rule, like a browser's.
+    let (out, _) = compile(".a { RichText: false; }", &["--approx"]);
+    assert!(out.contains("rule(userAgent, \"TextLabel, TextButton, TextBox\", "), "{out}");
+    assert!(!out.contains("rule(sheet, \"TextLabel, TextButton, TextBox\""), "{out}");
+    assert!(out.contains("derive.Name = \"UserAgent\"\nderive.StyleSheet = userAgent\nuserAgent.Parent = derive\nderive.Parent = sheet\n"), "{out}");
+    let (json, _) = compile(".a { RichText: false; }", &["--approx", "--emit", "json"]);
+    assert!(json.contains("\"userAgent\": ["), "{json}");
+    let (model, _) = compile(".a { RichText: false; }", &["--approx", "--emit", "rbxmx"]);
+    assert!(model.contains("<Item class=\"StyleDerive\""), "{model}");
+    assert!(model.contains("<string name=\"Name\">UserAgent</string>"), "{model}");
+    let (bare, _) = compile(".a { RichText: false; }", &["--approx", "--no-user-agent-styles"]);
+    assert!(!bare.contains("UserAgent"), "{bare}");
+}
+
+#[test]
+fn no_user_agent_styles_leaves_out_the_default_rules() {
+    let scss = ".row { display: flex; } .row > .a { width: 50px; } TextLabel { TextSize: 14; }";
+    let (out, _) = compile(scss, &["--approx", "--no-user-agent-styles"]);
+    for property in ["RichText", "TextWrapped", "AutoButtonColor", "AutomaticCanvasSize", "BorderSizePixel"] {
+        assert!(!out.contains(property), "{property} in {out}");
+    }
+    // Rules generated from the stylesheet's own flex containers stay.
+    assert!(out.contains("UIFlexItem"), "{out}");
+    assert!(rule_of(&out, "TextLabel").contains("TextSize = 14"), "{out}");
 }
 
 #[test]

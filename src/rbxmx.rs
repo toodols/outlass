@@ -43,6 +43,21 @@ pub fn write(sheet: &Sheet) -> Result<(String, Vec<String>), String> {
     for rule in &sheet.rules {
         w.rule(rule, 2)?;
     }
+    if !sheet.user_agent.is_empty() {
+        // The user-agent StyleSheet lives inside the StyleDerive that points at it.
+        w.open("StyleDerive", 2);
+        w.string("Name", "UserAgent", 4)?;
+        let _ = writeln!(w.out, "{}<Ref name=\"StyleSheet\">RBX{}</Ref>", "\t".repeat(4), w.next);
+        w.close_properties(3);
+        w.open("StyleSheet", 3);
+        w.string("Name", "UserAgent", 5)?;
+        w.close_properties(4);
+        for rule in &sheet.user_agent {
+            w.rule(rule, 4)?;
+        }
+        w.close_item(3);
+        w.close_item(2);
+    }
     w.close_item(1);
     w.out.push_str("</roblox>\n");
     Ok((w.out, w.dropped))

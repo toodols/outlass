@@ -15,22 +15,23 @@ export function approx_groups() {
  * Compiles `entry` from `files` (an object of path → source).
  *
  * `emit` is `luau`, `json`, `rbxmx` or `css`; `approx` lists approximation groups (`all` for
- * every group). Returns `{ ok, output, diagnostics: [{ level, message, file, line, col }] }`.
+ * every group); `user_agent` keeps the user-agent stylesheet. Returns `{ ok, output, diagnostics: [{ level, message, file, line, col }] }`.
  * @param {object} files
  * @param {string} entry
  * @param {string} emit
  * @param {string[]} approx
  * @param {boolean} strict
+ * @param {boolean} user_agent
  * @returns {object}
  */
-export function compile(files, entry, emit, approx, strict) {
+export function compile(files, entry, emit, approx, strict, user_agent) {
     const ptr0 = passStringToWasm0(entry, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len0 = WASM_VECTOR_LEN;
     const ptr1 = passStringToWasm0(emit, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len1 = WASM_VECTOR_LEN;
     const ptr2 = passArrayJsValueToWasm0(approx, wasm.__wbindgen_malloc);
     const len2 = WASM_VECTOR_LEN;
-    const ret = wasm.compile(files, ptr0, len0, ptr1, len1, ptr2, len2, strict);
+    const ret = wasm.compile(files, ptr0, len0, ptr1, len1, ptr2, len2, strict, user_agent);
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }

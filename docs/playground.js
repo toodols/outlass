@@ -9,7 +9,7 @@ const output = $("output");
 const status = $("status");
 
 /** files: [{ name, text }] in tab order; entry is the file compiled. */
-let state = { files: [], active: "", entry: "", emit: "luau", approx: ["all"], strict: false };
+let state = { files: [], active: "", entry: "", emit: "luau", approx: ["all"], strict: false, userAgent: true };
 let lastResult = null;
 
 function load() {
@@ -51,7 +51,7 @@ function run() {
   let result;
   try {
     result = file(state.entry)
-      ? compile(files, state.entry, state.emit, state.approx, state.strict)
+      ? compile(files, state.entry, state.emit, state.approx, state.strict, state.userAgent)
       : { ok: false, output: "", diagnostics: [{ level: "error", message: "Choose a file to compile (the dot on its tab)." }] };
   } catch (e) {
     // Rust panics surface here; keep the playground usable.
@@ -329,9 +329,13 @@ function setupOptions() {
     state.strict = e.target.checked;
     scheduleCompile();
   });
+  $("user-agent").addEventListener("change", (e) => {
+    state.userAgent = e.target.checked;
+    scheduleCompile();
+  });
   $("reset").addEventListener("click", () => {
     if (!confirm("Replace your files with the repository examples?")) return;
-    state = { ...exampleState(), emit: state.emit, approx: state.approx, strict: state.strict };
+    state = { ...exampleState(), emit: state.emit, approx: state.approx, strict: state.strict, userAgent: state.userAgent };
     selectFile(state.active);
     run();
   });
@@ -349,5 +353,6 @@ setupOptions();
 renderApprox();
 renderEmitTabs();
 $("strict").checked = state.strict;
+$("user-agent").checked = state.userAgent;
 selectFile(state.active);
 run();

@@ -1,4 +1,3 @@
-
 use std::collections::HashMap;
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
@@ -8,11 +7,11 @@ use std::time::{Duration, SystemTime};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 
 use outlass::approx::{self, ApproxOptions, Group};
-use outlass::{builtins, codegen, eval};
 use outlass::codegen::CodegenOptions;
 use outlass::diag::{Diagnostics, Level};
 use outlass::eval::{Options, Sheet, Syntax};
 use outlass::roblox::ValueOptions;
+use outlass::{builtins, codegen, eval};
 
 const LONG_ABOUT: &str = "\
 Compiles SCSS (plus indented .sass) into a Luau module that builds and \
@@ -42,10 +41,12 @@ substitute variables with #{$var} rather than writing $var on its own.
   * The CSS cascade sets StyleRule.Priority: `!important` declarations beat normal ones, \
 then later `@layer`s (styles outside any layer beat every layer; `!important` reverses the layer \
 order), then more specific selectors, then later rules.
-  * Like a browser's user-agent stylesheet, a lowest-priority rule turns RichText on for \
-TextLabel, TextButton and TextBox, and (with --approx=size) sizes every class from its content, \
-since a fresh Roblox element is 0x0. A rule that sets width and height turns that back off. Opt out \
-with `RichText: false` or `AutomaticSize: Enum.AutomaticSize.None` on any rule.
+  * Like a browser, the sheet has a user-agent stylesheet under it: a StyleSheet it derives from \
+(sheet.UserAgent), whose rules lose to every rule in the sheet whatever their priority. It turns \
+RichText on for TextLabel, TextButton and TextBox, and (with --approx=size) sizes every class from \
+its content, since a fresh Roblox element is 0x0. A rule that sets width and height turns that back \
+off. Opt out with `RichText: false` or `AutomaticSize: Enum.AutomaticSize.None` on any rule, delete \
+sheet.UserAgent, or leave it out with --no-user-agent-styles.
   * `width: 100%` needs a parent with a definite width; under a parent that hugs its content it \
 collapses to zero (Roblox resolves percentages against the parent's size, where CSS would treat one \
 against an auto-sized parent as `auto`).
@@ -203,6 +204,12 @@ struct BuildArgs {
     /// StyleSheet
     #[arg(long)]
     allow_raw_luau: bool,
+
+    /// Leave out the user-agent stylesheet (sheet.UserAgent): the defaults that turn RichText and
+    /// TextWrapped on, size elements from their content, clear the default gray background and
+    /// border, and so on. Elements then keep Roblox's own defaults wherever no rule sets a property
+    #[arg(long)]
+    no_user_agent_styles: bool,
 
     /// Recompile whenever an input file or anything it imports changes
     #[arg(short, long)]
@@ -506,11 +513,13 @@ fn codegen_options(
             strict: args.strict,
             tokens: HashMap::new(),
             inherited_family: None,
+            user_agent: false,
         },
         values,
         sheet_name: sheet_name.to_string(),
         header,
         tags: tags.clone(),
+        user_agent_styles: !args.no_user_agent_styles,
     }
 }
 

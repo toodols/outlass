@@ -125,6 +125,11 @@ pub struct Sheet {
     /// derives from it through a StyleDerive named `Theme`, so switching theme is
     /// `sheet.Theme.StyleSheet = sheet.Themes.dark`.
     pub themes: Vec<Theme>,
+    /// The user-agent stylesheet: defaults that make fresh Roblox elements start out like CSS
+    /// boxes. It's a StyleSheet of its own the sheet derives from, through a StyleDerive named
+    /// `UserAgent`, so every rule in the sheet beats it whatever their priorities (measured in
+    /// Studio), and deleting `sheet.UserAgent` drops it.
+    pub user_agent: Vec<Rule>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -178,7 +183,7 @@ pub fn emit(sheet: &Sheet, opts: &EmitOptions) -> Result<String, String> {
         }
         out.push_str("theme.Parent = sheet\n");
     }
-    if !sheet.rules.is_empty() {
+    if !sheet.rules.is_empty() || !sheet.user_agent.is_empty() {
         out.push_str(
             "\nlocal function rule(parent: Instance, selector: string, priority: number?, properties: { [string]: any }?): StyleRule\n\
              \tlocal r = Instance.new(\"StyleRule\")\n\
@@ -198,6 +203,25 @@ pub fn emit(sheet: &Sheet, opts: &EmitOptions) -> Result<String, String> {
     for rule in &sheet.rules {
         out.push('\n');
         emit_rule(&mut out, rule, "sheet", 0, opts)?;
+    }
+    if !sheet.user_agent.is_empty() {
+        out.push_str(
+            "\n-- The user-agent stylesheet: defaults under every rule above, like a browser's. Delete\n\
+             -- sheet.UserAgent to go without it.\n\
+             local userAgent = Instance.new(\"StyleSheet\")\n\
+             userAgent.Name = \"UserAgent\"\n",
+        );
+        for rule in &sheet.user_agent {
+            out.push('\n');
+            emit_rule(&mut out, rule, "userAgent", 0, opts)?;
+        }
+        out.push_str(
+            "\nlocal derive = Instance.new(\"StyleDerive\")\n\
+             derive.Name = \"UserAgent\"\n\
+             derive.StyleSheet = userAgent\n\
+             userAgent.Parent = derive\n\
+             derive.Parent = sheet\n",
+        );
     }
     out.push_str("\nreturn sheet\n");
     Ok(out)
@@ -541,6 +565,7 @@ pub fn to_json(sheet: &Sheet) -> String {
         ("name", str(&sheet.name)),
         ("attributes", map_json(&sheet.attributes, value_json)),
         ("rules", Json::Array(sheet.rules.iter().map(rule_json).collect())),
+        ("userAgent", Json::Array(sheet.user_agent.iter().map(rule_json).collect())),
         (
             "themes",
             Json::Array(

@@ -10,9 +10,9 @@ export function approx_groups(): string[];
  * Compiles `entry` from `files` (an object of path → source).
  *
  * `emit` is `luau`, `json`, `rbxmx` or `css`; `approx` lists approximation groups (`all` for
- * every group). Returns `{ ok, output, diagnostics: [{ level, message, file, line, col }] }`.
+ * every group); `user_agent` keeps the user-agent stylesheet. Returns `{ ok, output, diagnostics: [{ level, message, file, line, col }] }`.
  */
-export function compile(files: object, entry: string, emit: string, approx: string[], strict: boolean): object;
+export function compile(files: object, entry: string, emit: string, approx: string[], strict: boolean, user_agent: boolean): object;
 
 /**
  * The repository's examples, used as the playground's starting files.
@@ -24,7 +24,7 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly approx_groups: () => [number, number];
-    readonly compile: (a: any, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
+    readonly compile: (a: any, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number];
     readonly example_files: () => any;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;

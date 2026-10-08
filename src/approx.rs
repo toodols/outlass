@@ -127,6 +127,9 @@ pub struct ApproxOptions {
     pub groups: Vec<Group>,
     /// Warn about CSS that compiles to a different layout than a browser gives it (`--strict`).
     pub strict: bool,
+    /// Translating the user-agent stylesheet, the bottom of the cascade: no rule ranks below it,
+    /// only the element's own properties, which win anyway (as inline styles do in CSS).
+    pub user_agent: bool,
 }
 
 #[derive(Clone)]
@@ -3029,7 +3032,10 @@ fn translate_size_from_content(decls: &[Decl], opts: &ApproxOptions, diag: &mut 
         // Only `fit-content`/`auto` axes, and no length for either axis anywhere in the cascade:
         // the element is sized by its content on both. AutomaticSize only ever grows an element
         // past its Size, so the Size is zeroed too, or a weaker rule's size would stay as a floor.
-        out.set_prop("Size", luau::Value::udim2(0.0, 0.0, 0.0, 0.0));
+        // The user-agent sheet has no weaker rules, so it leaves the element's own Size alone.
+        if !opts.user_agent {
+            out.set_prop("Size", luau::Value::udim2(0.0, 0.0, 0.0, 0.0));
+        }
         out.set_prop("AutomaticSize", luau::Value::enum_item("AutomaticSize", "XY"));
     } else if w.is_some() || h.is_some() || stretch_x.is_some() || stretch_y.is_some() {
         let x_given = w.is_some() || stretch_x.is_some();
@@ -4828,7 +4834,13 @@ mod tests {
     use super::*;
 
     fn opts_for(groups: &[Group]) -> ApproxOptions {
-        ApproxOptions { groups: Group::expand(groups), strict: false, tokens: HashMap::new(), inherited_family: None }
+        ApproxOptions {
+            groups: Group::expand(groups),
+            strict: false,
+            tokens: HashMap::new(),
+            inherited_family: None,
+            user_agent: false,
+        }
     }
 
     fn all_opts() -> ApproxOptions {

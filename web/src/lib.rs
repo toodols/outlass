@@ -17,9 +17,16 @@ use wasm_bindgen::prelude::*;
 /// Compiles `entry` from `files` (an object of path → source).
 ///
 /// `emit` is `luau`, `json`, `rbxmx` or `css`; `approx` lists approximation groups (`all` for
-/// every group). Returns `{ ok, output, diagnostics: [{ level, message, file, line, col }] }`.
+/// every group); `user_agent` keeps the user-agent stylesheet. Returns `{ ok, output, diagnostics: [{ level, message, file, line, col }] }`.
 #[wasm_bindgen]
-pub fn compile(files: &Object, entry: &str, emit: &str, approx: Vec<String>, strict: bool) -> Result<Object, JsValue> {
+pub fn compile(
+    files: &Object,
+    entry: &str,
+    emit: &str,
+    approx: Vec<String>,
+    strict: bool,
+    user_agent: bool,
+) -> Result<Object, JsValue> {
     let mut fs = MemoryFs::new();
     for pair in Object::entries(files).iter() {
         let pair = Array::from(&pair);
@@ -61,10 +68,12 @@ pub fn compile(files: &Object, entry: &str, emit: &str, approx: Vec<String>, str
             strict,
             tokens: HashMap::new(),
             inherited_family: None,
+            user_agent: false,
         },
         sheet_name: sheet_name.clone(),
         header,
         tags: HashMap::new(),
+        user_agent_styles: user_agent,
     };
     let output = match emit {
         "luau" => codegen::emit_luau(&sheet, &codegen(Some(entry.to_string())), &mut diag),
