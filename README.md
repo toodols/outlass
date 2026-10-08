@@ -9,6 +9,9 @@ cargo install --path .
 outlass ui.scss --approx
 ```
 
+## Try it
+https://toodols.github.io/outlass
+
 ## Options
 
 | Option | What it does |
