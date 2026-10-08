@@ -360,18 +360,28 @@ fn math_global(name: &str, mut args: Args) -> Option<Result<Value, String>> {
     }
 }
 
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn seed() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0x9E3779B97F4A7C15)
+}
+
+/// The browser has no clock std can read (`SystemTime::now` panics there), so the web build
+/// starts from a fixed seed; the sequence still advances across calls.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn seed() -> u64 {
+    0x9E3779B97F4A7C15
+}
+
 fn next_random_f64() -> f64 {
     use std::cell::Cell;
-    use std::time::{SystemTime, UNIX_EPOCH};
     thread_local! {
         static STATE: Cell<u64> = const { Cell::new(0) };
     }
     STATE.with(|state| {
         let mut x = state.get();
         if x == 0 {
-            let nanos =
-                SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0x9E3779B97F4A7C15);
-            x = nanos ^ 0x2545F4914F6CDD1D;
+            x = seed() ^ 0x2545F4914F6CDD1D;
             if x == 0 {
                 x = 0x9E3779B97F4A7C15;
             }

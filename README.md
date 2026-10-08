@@ -30,6 +30,20 @@ outlass ui.scss --approx
 `outlass properties [NAME]` shows how each CSS property is translated. `outlass functions [FILTER]` lists
 the built-in Sass functions.
 
+## Web playground
+
+`docs/` is a browser playground, served by GitHub Pages from the `docs` folder. `web/` compiles the
+compiler to WebAssembly for it; files live in editor tabs and are read through an in-memory
+filesystem (`outlass::fs::MemoryFs`), so `@use` works between tabs.
+
+The compiled module in `docs/pkg` is committed. After changing the compiler, rebuild it (wasm-pack
+writes a `.gitignore` that would hide it from git, so delete that):
+
+```sh
+wasm-pack build web --release --target web --out-dir ../docs/pkg --no-pack && rm docs/pkg/.gitignore
+python -m http.server 8173 --directory docs
+```
+
 ## Changes of note
 
 Roblox and CSS disagree in a lot of small ways. These are the fixes you wouldn't guess:

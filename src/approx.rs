@@ -58,6 +58,11 @@ impl Group {
         }
     }
 
+    /// Every group except `All`.
+    pub fn concrete() -> &'static [Group] {
+        &CONCRETE_GROUPS
+    }
+
     /// Expands `All` into every concrete group; deduplicates while preserving order.
     pub fn expand(groups: &[Group]) -> Vec<Group> {
         let source: Vec<Group> = if groups.contains(&Group::All) { CONCRETE_GROUPS.to_vec() } else { groups.to_vec() };

@@ -1,17 +1,3 @@
-mod approx;
-mod ast;
-mod builtins;
-mod codegen;
-mod diag;
-mod eval;
-mod indented;
-mod luau;
-mod parser;
-mod query;
-mod rbxmx;
-mod roblox;
-mod selector;
-mod value;
 
 use std::collections::HashMap;
 use std::io::{IsTerminal, Read, Write};
@@ -21,11 +7,12 @@ use std::time::{Duration, SystemTime};
 
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 
-use crate::approx::{ApproxOptions, Group};
-use crate::codegen::CodegenOptions;
-use crate::diag::{Diagnostics, Level};
-use crate::eval::{Options, Sheet, Syntax};
-use crate::roblox::ValueOptions;
+use outlass::approx::{self, ApproxOptions, Group};
+use outlass::{builtins, codegen, eval};
+use outlass::codegen::CodegenOptions;
+use outlass::diag::{Diagnostics, Level};
+use outlass::eval::{Options, Sheet, Syntax};
+use outlass::roblox::ValueOptions;
 
 const LONG_ABOUT: &str = "\
 Compiles SCSS (plus indented .sass) into a Luau module that builds and \
@@ -409,7 +396,7 @@ fn eval_options(args: &BuildArgs) -> Result<Options, String> {
         let value = eval::evaluate_expression(value).map_err(|e| format!("--define {name}: {}", e.message))?;
         defines.push((name.to_string(), value));
     }
-    Ok(Options { load_paths: args.load_paths.clone(), defines })
+    Ok(Options { load_paths: args.load_paths.clone(), defines, ..Options::default() })
 }
 
 /// Reads `--tags`: a JSON object from each tag (or `#Name`) to a list of GuiObject class names.

@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>outlass playground</title>
+  <link rel="stylesheet" href="playground.css">
+  <script type="module" src="playground.js"></script>
+</head>
+<body>
+  <header class="bar">
+    <h1>outlass <span>playground</span></h1>
+    <div class="options">
+      <details class="approx" id="approx">
+        <summary>Approximate CSS: <b id="approx-summary">all</b></summary>
+        <div class="approx-menu">
+          <label><input type="checkbox" id="approx-all" checked> all groups</label>
+          <div id="approx-groups"></div>
+        </div>
+      </details>
+      <label class="toggle" title="Fail on CSS that lays out differently in Roblox than in a browser">
+        <input type="checkbox" id="strict"> strict
+      </label>
+      <button id="reset" type="button" title="Replace your files with the repository examples">Reset files</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="pane" aria-label="Input">
+      <nav class="tabs" id="file-tabs" role="tablist"></nav>
+      <div class="editor">
+        <pre class="gutter" id="gutter" aria-hidden="true"></pre>
+        <textarea id="source" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="SCSS source"></textarea>
+      </div>
+      <p class="hint">
+        Files named <code>_name.scss</code> are partials for <code>@use "name"</code>.
+        The file marked <span class="entry-dot"></span> is compiled; double-click a tab to rename it.
+      </p>
+    </section>
+
+    <section class="pane" aria-label="Output">
+      <nav class="tabs" role="tablist" id="emit-tabs">
+        <button role="tab" data-emit="luau" aria-selected="true">Luau</button>
+        <button role="tab" data-emit="json">JSON</button>
+        <button role="tab" data-emit="css">CSS</button>
+        <button role="tab" data-emit="rbxmx">rbxmx</button>
+        <span class="spacer"></span>
+        <span class="status" id="status"></span>
+        <button class="action" id="copy" type="button">Copy</button>
+        <button class="action" id="download" type="button">Download</button>
+      </nav>
+      <pre class="output" id="output"></pre>
+      <ul class="diagnostics" id="diagnostics" aria-label="Diagnostics"></ul>
+    </section>
+  </main>
+</body>
+</html>

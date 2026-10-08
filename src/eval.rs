@@ -8,6 +8,7 @@ use std::rc::Rc;
 use crate::ast::*;
 use crate::builtins;
 use crate::diag::{Diagnostics, Error, Result, Span};
+use crate::fs::{FileSystem, OsFs};
 use crate::indented;
 use crate::parser::{self, normalize};
 use crate::query::{self, Query};
@@ -29,12 +30,20 @@ impl Syntax {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Options {
     /// Extra directories searched by `@use`/`@forward`/`@import`.
     pub load_paths: Vec<PathBuf>,
     /// Global variables set before compilation (`--define`).
     pub defines: Vec<(String, Value)>,
+    /// Where stylesheets are read from.
+    pub fs: Rc<dyn FileSystem>,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options { load_paths: Vec::new(), defines: Vec::new(), fs: Rc::new(OsFs) }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -219,7 +228,7 @@ pub struct Evaluator<'a> {
 
 pub fn compile_file(path: &Path, opts: &Options, diag: &mut Diagnostics) -> Result<Sheet> {
     let source =
-        std::fs::read_to_string(path).map_err(|e| Error::new(format!("can't read {}: {e}", path.display())))?;
+        opts.fs.read_to_string(path).map_err(|e| Error::new(format!("can't read {}: {e}", path.display())))?;
     let syntax = Syntax::from_path(path);
     compile_source(&source, path, syntax, opts, diag)
 }
@@ -232,7 +241,7 @@ pub fn compile_source(
     diag: &mut Diagnostics,
 ) -> Result<Sheet> {
     let mut ev = Evaluator::new(opts, diag, path.parent().map(Path::to_path_buf).unwrap_or_default());
-    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let canonical = opts.fs.canonicalize(path);
     ev.sheet.files.push(canonical.clone());
     let stmts = Rc::new(parse_source(source, path, syntax)?);
     let root = new_module_root();
@@ -1037,7 +1046,10 @@ impl<'a> Evaluator<'a> {
         if let Some(stmts) = self.parsed.get(path) {
             return Ok(stmts.clone());
         }
-        let source = std::fs::read_to_string(path)
+        let source = self
+            .opts
+            .fs
+            .read_to_string(path)
             .map_err(|e| Error::at(format!("can't read {}: {e}", path.display()), span))?;
         let syntax = Syntax::from_path(path);
         let stmts = Rc::new(parse_source(&source, path, syntax)?);
@@ -1068,8 +1080,8 @@ impl<'a> Evaluator<'a> {
                     candidates.push(joined.join(format!("index.{ext}")));
                 }
             }
-            if let Some(found) = candidates.into_iter().find(|c| c.is_file()) {
-                return Some(std::fs::canonicalize(&found).unwrap_or(found));
+            if let Some(found) = candidates.into_iter().find(|c| self.opts.fs.is_file(c)) {
+                return Some(self.opts.fs.canonicalize(&found));
             }
         }
         None
@@ -1847,6 +1859,23 @@ mod tests {
         let sheet = compile_source(src, Path::new("test.scss"), Syntax::Scss, &Options::default(), &mut diag)
             .unwrap_or_else(|e| panic!("{e}"));
         (sheet, diag)
+    }
+
+    #[test]
+    fn imports_resolve_through_the_options_filesystem() {
+        let mut fs = crate::fs::MemoryFs::new();
+        fs.insert("ui/main.scss", "@use \"theme\";
+@import \"../shared/base\";
+Frame { BackgroundColor3: theme.$bg; }");
+        fs.insert("ui/_theme.scss", "$bg: #102030;");
+        fs.insert("shared/_base.scss", "TextLabel { TextSize: 14; }");
+        let opts = Options { fs: Rc::new(fs), ..Options::default() };
+        let mut diag = Diagnostics::default();
+        let sheet = compile_file(Path::new("ui/main.scss"), &opts, &mut diag).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(css(&sheet), "TextLabel { TextSize: 14; }
+Frame { BackgroundColor3: #102030; }
+");
+        assert_eq!(sheet.files.len(), 3);
     }
 
     fn css(sheet: &Sheet) -> String {

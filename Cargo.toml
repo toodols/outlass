@@ -5,6 +5,9 @@ edition = "2024"
 license = "MIT"
 description = "Compiles SCSS (and indented Sass / lass) into Luau code that builds a Roblox StyleSheet"
 
+[workspace]
+members = ["web"]
+
 [[bin]]
 name = "outlass"
 path = "src/main.rs"
