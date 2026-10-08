@@ -509,6 +509,7 @@ fn codegen_options(args: &BuildArgs, sheet_name: &str, tags: &HashMap<String, Ve
             tokens: HashMap::new(),
             inherited_family: None,
             user_agent: false,
+            pictures: Default::default(),
         },
         values,
         sheet_name: sheet_name.to_string(),

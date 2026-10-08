@@ -289,7 +289,7 @@ fn math_global(name: &str, mut args: Args) -> Option<Result<Value, String>> {
                 "floor" => n.value.floor(),
                 _ => n.value.abs(),
             };
-            Ok(Value::Number(Number { value: result, numer: n.numer.clone(), denom: n.denom.clone() }))
+            Ok(Value::Number(Number { value: result, numer: n.numer.clone(), denom: n.denom.clone(), slash: None }))
         })()),
         "min" | "max" => Some((|| {
             let mut vals = Vec::new();

@@ -130,6 +130,31 @@ pub struct ApproxOptions {
     /// Translating the user-agent stylesheet, the bottom of the cascade: no rule ranks below it,
     /// only the element's own properties, which win anyway (as inline styles do in CSS).
     pub user_agent: bool,
+    /// The pictures the stylesheet's rules set anywhere, which a rule can't see from its own
+    /// declarations: a `background` without a picture clears one only if some rule sets one.
+    pub pictures: SheetPictures,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SheetPictures {
+    /// Some rule sets a `url()` background.
+    pub background: bool,
+    /// Some rule sets a `url()` border image (the same `Image` in Roblox).
+    pub border: bool,
+}
+
+impl SheetPictures {
+    pub fn of<'a>(decls: impl IntoIterator<Item = (&'a str, &'a Value)>) -> SheetPictures {
+        let mut pictures = SheetPictures::default();
+        for (name, value) in decls {
+            match strip_vendor_prefix(name) {
+                "background" | "background-image" => pictures.background |= has_url(value),
+                "border-image" | "border-image-source" => pictures.border |= has_url(value),
+                _ => {}
+            }
+        }
+        pictures
+    }
 }
 
 #[derive(Clone)]
@@ -775,10 +800,13 @@ fn desugar(decls: &[Decl], opts: &ApproxOptions, diag: &mut Diagnostics) -> (Vec
         let mut expanded = Vec::with_capacity(out.len());
         let mut picture_before = false;
         for d in out {
-            let longhands =
-                if d.name == "background" { background_longhands(&d, picture_before, diag) } else { Vec::new() };
+            let longhands = if d.name == "background" {
+                background_longhands(&d, picture_before, opts.pictures, diag)
+            } else {
+                Vec::new()
+            };
             if matches!(d.name.as_str(), "background" | "background-image") {
-                picture_before = layers(&d.value).iter().any(|l| space_items(l).iter().any(is_url));
+                picture_before = has_url(&d.value);
             }
             expanded.push(d);
             expanded.extend(longhands);
@@ -1019,7 +1047,7 @@ fn translate_border_image(decls: &[Decl], diag: &mut Diagnostics, out: &mut Tran
         return;
     };
     out.set_prop("Image", luau::Value::String(id));
-    if let Some(bg) = last(decls, "background-image").filter(|bg| layers(&bg.value).iter().any(is_url)) {
+    if let Some(bg) = last(decls, "background-image").filter(|bg| has_url(&bg.value)) {
         diag.warn(
             "Roblox has one Image, so the `border-image` is drawn and the background picture under it isn't",
             bg.span.as_ref(),
@@ -1726,56 +1754,93 @@ fn translate_color_opacity(
     }
 }
 
+/// The two sides of a `/` between values: a slash list, or a number that keeps the slash it was
+/// written with (`20px/1.5`).
+fn slash_parts(v: &Value) -> Option<(Value, Value)> {
+    match v {
+        Value::List { items, sep: ListSep::Slash, .. } if items.len() == 2 => {
+            Some((items[0].clone(), items[1].clone()))
+        }
+        Value::Number(Number { slash: Some(parts), .. }) => {
+            Some((Value::Number(parts.0.clone()), Value::Number(parts.1.clone())))
+        }
+        _ => None,
+    }
+}
+
+/// Whether a `background`/`background-image`/`border-image` value has a `url()` layer.
+fn has_url(v: &Value) -> bool {
+    layers(v).iter().any(|l| space_items(l).iter().any(is_url))
+}
+
 fn is_url(v: &Value) -> bool {
     matches!(v, Value::Call { name, .. } if name == "url")
 }
 
 /// The longhands a `background` shorthand sets for its picture: `background-image`, and the
 /// `background-size` and `background-repeat` it resets (to `auto` and `repeat`) unless it gives
-/// them. A shorthand without a picture clears one an earlier declaration set.
-fn background_longhands(d: &Decl, picture_before: bool, diag: &mut Diagnostics) -> Vec<Decl> {
+/// them. A shorthand without a picture clears one, as CSS does, when an earlier declaration or any
+/// rule of the stylesheet sets one.
+fn background_longhands(d: &Decl, picture_before: bool, sheet: SheetPictures, diag: &mut Diagnostics) -> Vec<Decl> {
     let decl = |name: &str, value: Value| Decl { name: name.to_string(), value, span: d.span.clone() };
     let Some(layer) = layers(&d.value).into_iter().find(|l| space_items(l).iter().any(is_url)) else {
-        return if picture_before { vec![decl("background-image", Value::str("none"))] } else { Vec::new() };
+        if !picture_before && !sheet.background {
+            return Vec::new();
+        }
+        if sheet.border {
+            diag.warn(
+                "`background` clears the element's background picture, which is the same Image as a border image \
+                 in Roblox: an element with a `border-image` loses it here",
+                d.span.as_ref(),
+            );
+        }
+        return vec![decl("background-image", Value::str("none"))];
     };
     let mut image = None;
-    let mut size = Value::str("auto");
+    let mut size: Vec<Value> = Vec::new();
+    let mut in_size = false;
     let mut repeat = Value::str("repeat");
     let mut positioned = false;
-    let mut lost_size = false;
+    let position_keyword = |p: &str| matches!(p, "left" | "right" | "top" | "bottom");
+    let at_origin = |v: &Value| v.as_number().is_some_and(|n| n.value == 0.0);
     for item in space_items(&layer) {
-        match &item {
-            v if is_url(v) => image = Some(item.clone()),
-            Value::Str { text, quoted: false } => {
-                let lower = text.to_ascii_lowercase();
-                let position = |p: &str| matches!(p, "left" | "right" | "top" | "bottom");
-                if let Some((before, after)) = lower.split_once('/') {
-                    positioned |= position(before);
-                    size = Value::str(after);
-                } else if matches!(lower.as_str(), "repeat" | "no-repeat" | "repeat-x" | "repeat-y" | "space" | "round")
-                {
-                    repeat = item.clone();
-                } else {
-                    positioned |= position(&lower);
-                }
+        let size_keyword = item.as_str().is_some_and(|s| matches!(s, "auto" | "cover" | "contain"));
+        if is_url(&item) {
+            image = Some(item.clone());
+        } else if let Some((position, first)) = slash_parts(&item) {
+            // `0 0 / 32px 32px`: the number before the `/` is the position's, the one after the size's.
+            positioned |= !at_origin(&position);
+            size.push(first);
+            in_size = true;
+        } else if let Some((before, after)) = item.as_str().and_then(|s| s.split_once('/')) {
+            // `center / cover`, `left / 32px`: a keyword on either side makes a string.
+            positioned |= position_keyword(&before.to_ascii_lowercase());
+            let after = after.trim();
+            size.push(crate::eval::evaluate_expression(after).unwrap_or_else(|_| Value::str(after)));
+            in_size = true;
+        } else if in_size && size.len() < 2 && (item.as_number().is_some() || size_keyword) {
+            size.push(item.clone());
+        } else if let Some(s) = item.as_str() {
+            in_size = false;
+            let lower = s.to_ascii_lowercase();
+            if matches!(lower.as_str(), "repeat" | "no-repeat" | "repeat-x" | "repeat-y" | "space" | "round") {
+                repeat = item.clone();
+            } else {
+                positioned |= position_keyword(&lower);
             }
-            // `0 0 / 32px 32px` reaches here divided (`0 / 32px`), and the size can't be recovered.
-            Value::Number(n) if !n.denom.is_empty() => lost_size = true,
-            Value::Number(n) => positioned |= n.value != 0.0,
-            _ => {}
+        } else if item.as_number().is_some() {
+            positioned |= !at_origin(&item);
         }
     }
+    let size = match size.len() {
+        0 => Value::str("auto"),
+        1 => size.remove(0),
+        _ => Value::list(size, ListSep::Space),
+    };
     if positioned {
         diag.warn(
             "`background`: a picture's position has no Roblox equivalent (a cropped or fitted picture is centered, a \
              tiled one starts at the top left)",
-            d.span.as_ref(),
-        );
-    }
-    if lost_size {
-        diag.warn(
-            "`background`: outlass reads `/` between numbers as division, so the size after it is lost; set \
-             `background-size` instead",
             d.span.as_ref(),
         );
     }
@@ -2524,10 +2589,9 @@ fn parse_font_shorthand(v: &Value, diag: &mut Diagnostics, span: Option<&Span>) 
             }
             continue;
         }
-        // The size term may be a `size/line-height` slash list.
-        if let Value::List { items: parts, sep: ListSep::Slash, .. } = item
-            && let (Some(sz), Some(lh)) = (parts.first(), parts.get(1))
-        {
+        // The size term may be `size/line-height`.
+        if let Some((sz, lh)) = slash_parts(item) {
+            let (sz, lh) = (&sz, &lh);
             size = Some(font_size_value(sz)?);
             line_height = match lh {
                 Value::Number(n) if n.is_unitless() => Some(n.value),
@@ -4927,6 +4991,7 @@ mod tests {
             tokens: HashMap::new(),
             inherited_family: None,
             user_agent: false,
+            pictures: SheetPictures::default(),
         }
     }
 

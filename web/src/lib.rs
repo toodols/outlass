@@ -69,6 +69,7 @@ pub fn compile(
             tokens: HashMap::new(),
             inherited_family: None,
             user_agent: false,
+            pictures: Default::default(),
         },
         sheet_name,
         tags: HashMap::new(),

@@ -1723,6 +1723,37 @@ fn the_universal_selector_is_every_gui_object() {
 }
 
 #[test]
+fn slashed_sizes_reach_font_and_background() {
+    let (out, stderr) = compile(
+        r#".z { font: bold 20px/1.5 "Montserrat"; }
+           .i { background: url("rbxassetid://1") 0 0 / 32px 32px repeat; }
+           .r { aspect-ratio: 16 / 9; }"#,
+        &["--approx"],
+    );
+    assert!(rule_of(&out, ".z").contains(r#"["LineHeight"]"#), "{out}");
+    let i = rule_of(&out, ".i");
+    assert!(i.contains("Enum.ScaleType.Tile") && i.contains("UDim2.new(0, 32, 0, 32)"), "{out}");
+    assert!(rule_of(&out, ".r::UIAspectRatioConstraint").contains("1.7777777778"), "{out}");
+    assert!(!stderr.contains("warning"), "{stderr}");
+}
+
+#[test]
+fn a_background_without_a_picture_clears_another_rules_picture() {
+    let (out, _) =
+        compile(r#".o { background-image: url("rbxassetid://1"); } .o.p { background: red; }"#, &["--approx"]);
+    assert!(rule_of(&out, ".o.p").contains(r#"["Image"] = """#), "{out}");
+    // Without a picture anywhere there's nothing to clear.
+    let (out, _) = compile(".m { background: blue; }", &["--approx"]);
+    assert!(!rule_of(&out, ".m").contains("Image"), "{out}");
+    // The same Image as a border image, which it would clear too.
+    let (_, stderr) = compile(
+        r#".o { background-image: url("rbxassetid://1"); } .b { border-image: url("rbxassetid://2#96x96") 32 fill; } .p { background: red; }"#,
+        &["--approx"],
+    );
+    assert!(stderr.contains("an element with a `border-image` loses it here"), "{stderr}");
+}
+
+#[test]
 fn the_background_shorthand_draws_its_picture() {
     let (out, stderr) = compile(
         r#".c { background: url("rbxassetid://1") no-repeat center / cover; }

@@ -457,6 +457,7 @@ impl<'a> Evaluator<'a> {
                     let scope = new_env(Some(env.clone()), true);
                     let mut n = a.clone();
                     n.value = i as f64;
+                    n.slash = None;
                     scope.borrow_mut().vars.insert(var.clone(), Value::Number(n));
                     if let Flow::Return(v) = self.exec_block(body, &scope)? {
                         return Ok(Flow::Return(v));
@@ -1188,7 +1189,14 @@ impl<'a> Evaluator<'a> {
                 }
                 Value::Map(out)
             }
-            Expr::Paren(inner) => self.eval(inner, env)?,
+            // Parentheses make a `/` divide: `(20px/2)` is `10px`.
+            Expr::Paren(inner) => match self.eval(inner, env)? {
+                Value::Number(mut n) => {
+                    n.slash = None;
+                    Value::Number(n)
+                }
+                v => v,
+            },
             Expr::Parent => match &self.selector {
                 Some(sel) => Value::str(sel.to_css()),
                 None => Value::Null,
@@ -1199,6 +1207,7 @@ impl<'a> Evaluator<'a> {
                     (UnaryOp::Not, v) => Value::Bool(!v.is_truthy()),
                     (UnaryOp::Neg, Value::Number(mut n)) => {
                         n.value = -n.value;
+                        n.slash = None;
                         Value::Number(n)
                     }
                     (UnaryOp::Plus, Value::Number(n)) => Value::Number(n),
@@ -1216,7 +1225,17 @@ impl<'a> Evaluator<'a> {
                     _ => {}
                 }
                 let r = self.eval(rhs, env)?;
-                binary(*op, &l, &r).map_err(|e| Error::at(e, span))?
+                let value = binary(*op, &l, &r).map_err(|e| Error::at(e, span))?;
+                // `20px/1.5` between literal numbers stays a slash, as in Sass (`font`, `background`).
+                match (value, &l, &r) {
+                    (Value::Number(mut n), Value::Number(a), Value::Number(b))
+                        if *op == BinOp::Div && allows_slash(lhs) && allows_slash(rhs) =>
+                    {
+                        n.slash = Some(Box::new((a.clone(), b.clone())));
+                        Value::Number(n)
+                    }
+                    (value, ..) => value,
+                }
             }
             Expr::Call { name, args, span } => self.call(name, args, env, span)?,
         })
@@ -1839,6 +1858,15 @@ fn binary(op: BinOp, l: &Value, r: &Value) -> Result<Value, String> {
     })
 }
 
+/// Whether a `/` with this operand keeps its slash: a literal number, or another such `/`.
+fn allows_slash(e: &Expr) -> bool {
+    match e {
+        Expr::Value(Value::Number(_)) => true,
+        Expr::Binary { op: BinOp::Div, lhs, rhs, .. } => allows_slash(lhs) && allows_slash(rhs),
+        _ => false,
+    }
+}
+
 fn op_symbol(op: BinOp) -> &'static str {
     match op {
         BinOp::Lt => "<",
@@ -1858,6 +1886,18 @@ mod tests {
         let sheet = compile_source(src, Path::new("test.scss"), Syntax::Scss, &Options::default(), &mut diag)
             .unwrap_or_else(|e| panic!("{e}"));
         (sheet, diag)
+    }
+
+    #[test]
+    fn a_slash_between_literal_numbers_stays_a_slash() {
+        let (sheet, _) = compile(
+            "$x: 10px/2; .a { a: 20px/1.5; b: (10px/2); c: $x; d: $x * 2; e: percentage(1/3); f: 1/2/3; g: -(1/2); \
+             h: 1/2 + 1; $w: 4px; i: $w/2; }",
+        );
+        assert_eq!(
+            css(&sheet),
+            ".a { a: 20px/1.5; b: 5px; c: 10px/2; d: 10px; e: 33.3333333333%; f: 1/2/3; g: -0.5; h: 1.5; i: 2px; }\n"
+        );
     }
 
     #[test]

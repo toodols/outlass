@@ -35,6 +35,9 @@ pub struct Number {
     pub value: f64,
     pub numer: Vec<String>,
     pub denom: Vec<String>,
+    /// The operands of a `/` written between two literal numbers (`20px/1.5`). As in Sass, the
+    /// number prints as `20px/1.5` until arithmetic uses it, which makes a new number.
+    pub slash: Option<Box<(Number, Number)>>,
 }
 
 /// Precision used by Sass when comparing and printing numbers.
@@ -82,14 +85,14 @@ pub fn conversion_factor(from: &str, to: &str) -> Option<f64> {
 
 impl Number {
     pub fn new(value: f64) -> Self {
-        Number { value, numer: Vec::new(), denom: Vec::new() }
+        Number { value, numer: Vec::new(), denom: Vec::new(), slash: None }
     }
 
     pub fn with_unit(value: f64, unit: &str) -> Self {
         if unit.is_empty() {
             return Number::new(value);
         }
-        Number { value, numer: vec![unit.to_string()], denom: Vec::new() }
+        Number { value, numer: vec![unit.to_string()], denom: Vec::new(), slash: None }
     }
 
     pub fn is_unitless(&self) -> bool {
@@ -183,10 +186,16 @@ impl Number {
                 value: f(self.value, other.value),
                 numer: other.numer.clone(),
                 denom: other.denom.clone(),
+                slash: None,
             });
         }
         match self.convert_units_of(other) {
-            Some(v) => Ok(Number { value: f(self.value, v), numer: self.numer.clone(), denom: self.denom.clone() }),
+            Some(v) => Ok(Number {
+                value: f(self.value, v),
+                numer: self.numer.clone(),
+                denom: self.denom.clone(),
+                slash: None,
+            }),
             None => Err(format!("Incompatible units {} and {} for `{op}`", self.unit_string(), other.unit_string())),
         }
     }
@@ -212,6 +221,7 @@ impl Number {
             value: self.value * other.value,
             numer: [self.numer.clone(), other.numer.clone()].concat(),
             denom: [self.denom.clone(), other.denom.clone()].concat(),
+            slash: None,
         };
         n.cancel_units();
         n
@@ -222,6 +232,7 @@ impl Number {
             value: self.value / other.value,
             numer: [self.numer.clone(), other.denom.clone()].concat(),
             denom: [self.denom.clone(), other.numer.clone()].concat(),
+            slash: None,
         };
         n.cancel_units();
         n
@@ -256,6 +267,9 @@ impl Number {
     }
 
     pub fn to_css(&self) -> String {
+        if let Some(parts) = &self.slash {
+            return format!("{}/{}", parts.0.to_css(), parts.1.to_css());
+        }
         let mut s = format_number(self.value);
         s.push_str(&self.unit_string());
         s

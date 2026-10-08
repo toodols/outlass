@@ -655,6 +655,9 @@ pub fn lower(sheet: &Sheet, opts: &CodegenOptions, diag: &mut Diagnostics) -> lu
         approx: ApproxOptions {
             tokens: referenced.clone(),
             inherited_family: root_family(sheet),
+            pictures: approx::SheetPictures::of(
+                sheet.rules.iter().flat_map(|r| r.decls.iter().map(|d| (d.name.as_str(), &d.value))),
+            ),
             ..opts.approx.clone()
         },
         ..opts.clone()
@@ -1689,6 +1692,7 @@ mod tests {
                 tokens: HashMap::new(),
                 inherited_family: None,
                 user_agent: false,
+                pictures: Default::default(),
             },
             values: ValueOptions { allow_raw_luau: false },
             sheet_name: "test".into(),
