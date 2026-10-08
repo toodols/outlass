@@ -2858,7 +2858,11 @@ fn translate_text(decls: &[Decl], inherited: Option<&str>, diag: &mut Diagnostic
         let fam = family.unwrap_or_else(|| inherited.unwrap_or(DEFAULT_FONT).to_string());
         out.set_prop(
             "FontFace",
-            luau::Value::Font { family: fam, weight: Some(w.to_string()), style: Some(s.to_string()) },
+            luau::Value::Font {
+                family: fam,
+                weight: Some(luau::EnumItem::of("FontWeight", w)),
+                style: Some(luau::EnumItem::of("FontStyle", s)),
+            },
         );
     }
 }

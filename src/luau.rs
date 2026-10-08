@@ -1,15 +1,17 @@
 //! The compiled stylesheet as data, and the only code that writes Luau.
 //!
 //! Everything outlass compiles ends up as a [`Sheet`]: rules with selectors and typed property
-//! values. No field holds Luau source except [`Value::Luau`], which only `--allow-raw-luau` lets
-//! through. `--emit json` prints a `Sheet` as JSON ([`to_json`]); [`emit`] turns the same `Sheet`
-//! into the Luau module. So whatever a stylesheet contains, the generated code can only build a
-//! StyleSheet: every string is escaped here, every name spliced into code is checked to be an
-//! identifier, and every value is one of a fixed set of constructors.
+//! values. `--emit json` prints a `Sheet` as JSON ([`to_json`]); [`emit`] turns the same `Sheet`
+//! into the Luau module. No JSON can become code: text from a stylesheet (names, selectors,
+//! property keys, strings) only ever reaches the Luau inside an escaped string literal, Enum names
+//! come from `enums.txt` ([`EnumItem`]), and every value is one of a fixed set of constructors.
+//! The one exception is [`Value::Luau`], raw Luau from `luau("...")` that only `--allow-raw-luau`
+//! lets into a `Sheet`, and that JSON has no way to hold: [`to_json`] refuses a sheet with any.
 //!
 //! This module depends on nothing else in the crate, so it can be audited on its own.
 
 use std::fmt::Write as _;
+use std::sync::OnceLock;
 
 /// An RGB color, channels 0-255 (may be fractional).
 #[derive(Clone, Debug, PartialEq)]
@@ -25,11 +27,64 @@ pub struct UDim {
     pub offset: f64,
 }
 
+/// An Enum item from `enums.txt`, the items GUI objects use. It can only be made by looking an
+/// item up in that table, so its names come from the binary, never from a stylesheet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EnumItem {
+    enum_type: &'static str,
+    item: &'static str,
+    value: u32,
+}
+
+impl EnumItem {
+    /// The item, if `enums.txt` has it.
+    pub fn get(enum_type: &str, item: &str) -> Option<EnumItem> {
+        enum_table().iter().copied().find(|e| e.enum_type == enum_type && e.item == item)
+    }
+
+    /// An item the compiler itself names; every such name is in `enums.txt`.
+    pub fn of(enum_type: &str, item: &str) -> EnumItem {
+        EnumItem::get(enum_type, item).unwrap_or_else(|| panic!("Enum.{enum_type}.{item} isn't in enums.txt"))
+    }
+
+    pub fn enum_type(self) -> &'static str {
+        self.enum_type
+    }
+
+    pub fn item(self) -> &'static str {
+        self.item
+    }
+
+    /// The number Roblox saves the item as.
+    pub fn value(self) -> u32 {
+        self.value
+    }
+}
+
+fn enum_table() -> &'static [EnumItem] {
+    static TABLE: OnceLock<Vec<EnumItem>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut items = Vec::new();
+        for line in include_str!("enums.txt").lines().filter(|l| !l.starts_with('#')) {
+            let mut words = line.split(' ');
+            let Some(enum_type) = words.next() else { continue };
+            for word in words {
+                if let Some((item, value)) = word.split_once('=')
+                    && let Ok(value) = value.parse()
+                {
+                    items.push(EnumItem { enum_type, item, value });
+                }
+            }
+        }
+        items
+    })
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct TweenInfo {
     pub time: f64,
-    pub easing_style: String,
-    pub easing_direction: String,
+    pub easing_style: EnumItem,
+    pub easing_direction: EnumItem,
     pub repeat_count: f64,
     pub reverses: bool,
     pub delay_time: f64,
@@ -39,8 +94,8 @@ impl TweenInfo {
     pub fn new(time: f64, easing_style: &str, easing_direction: &str, delay_time: f64) -> Self {
         TweenInfo {
             time,
-            easing_style: easing_style.to_string(),
-            easing_direction: easing_direction.to_string(),
+            easing_style: EnumItem::of("EasingStyle", easing_style),
+            easing_direction: EnumItem::of("EasingDirection", easing_direction),
             repeat_count: 0.0,
             reverses: false,
             delay_time,
@@ -56,10 +111,7 @@ pub enum Value {
     String(String),
     /// A design token reference: the string `"$Name"`.
     Token(String),
-    Enum {
-        enum_type: String,
-        item: String,
-    },
+    Enum(EnumItem),
     Color3(Color3),
     UDim(UDim),
     UDim2(UDim, UDim),
@@ -71,21 +123,22 @@ pub enum Value {
     ColorSequence(Vec<(f64, Color3)>),
     /// (time, value, envelope) keypoints
     NumberSequence(Vec<(f64, f64, f64)>),
-    /// `Font.new(family, weight, style)`; weight and style are FontWeight / FontStyle item names.
+    /// `Font.new(family, weight, style)`; weight and style are FontWeight / FontStyle items.
     Font {
         family: String,
-        weight: Option<String>,
-        style: Option<String>,
+        weight: Option<EnumItem>,
+        style: Option<EnumItem>,
     },
     /// `Font.fromEnum(Enum.Font.<item>)`
-    FontEnum(String),
-    /// Raw Luau from `luau("...")`, emitted verbatim. Refused unless `--allow-raw-luau`.
+    FontEnum(EnumItem),
+    /// Raw Luau from `luau("...")`, emitted verbatim. Only `--allow-raw-luau` makes one, and no
+    /// JSON can hold one.
     Luau(String),
 }
 
 impl Value {
     pub fn enum_item(enum_type: &str, item: &str) -> Value {
-        Value::Enum { enum_type: enum_type.to_string(), item: item.to_string() }
+        Value::Enum(EnumItem::of(enum_type, item))
     }
 
     pub fn udim(scale: f64, offset: f64) -> Value {
@@ -138,28 +191,17 @@ pub struct Theme {
     pub attributes: Vec<(String, Value)>,
 }
 
-pub struct EmitOptions {
-    /// Text for the "Generated by" header comment; `None` omits it.
-    pub header: Option<String>,
-    /// Whether [`Value::Luau`] may be emitted.
-    pub allow_raw_luau: bool,
-}
-
 // ----- Luau -----
 
 /// Writes the Luau module that builds `sheet` and returns it.
-pub fn emit(sheet: &Sheet, opts: &EmitOptions) -> Result<String, String> {
+pub fn emit(sheet: &Sheet) -> String {
     let mut out = String::new();
-    if let Some(header) = &opts.header {
-        // A line comment ends at the first line break, so none may get through.
-        let header: String = header.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
-        let _ = writeln!(out, "-- {header}");
-        out.push('\n');
-    }
+    // Fixed text only: nothing from the input goes into a comment.
+    let _ = writeln!(out, "-- Generated by outlass {}. Do not edit by hand.\n", env!("CARGO_PKG_VERSION"));
     out.push_str("local sheet = Instance.new(\"StyleSheet\")\n");
     let _ = writeln!(out, "sheet.Name = {}", string(&sheet.name));
     for (name, value) in &sheet.attributes {
-        let _ = writeln!(out, "sheet:SetAttribute({}, {})", string(name), expression(value, opts)?);
+        let _ = writeln!(out, "sheet:SetAttribute({}, {})", string(name), expression(value));
     }
     if !sheet.themes.is_empty() {
         out.push_str(
@@ -173,7 +215,7 @@ pub fn emit(sheet: &Sheet, opts: &EmitOptions) -> Result<String, String> {
             out.push_str("do\n\tlocal t = Instance.new(\"StyleSheet\")\n");
             let _ = writeln!(out, "\tt.Name = {}", string(&t.name));
             for (name, value) in &t.attributes {
-                let _ = writeln!(out, "\tt:SetAttribute({}, {})", string(name), expression(value, opts)?);
+                let _ = writeln!(out, "\tt:SetAttribute({}, {})", string(name), expression(value));
             }
             out.push_str("\tt.Parent = themes\n");
             if i == 0 {
@@ -202,7 +244,7 @@ pub fn emit(sheet: &Sheet, opts: &EmitOptions) -> Result<String, String> {
     }
     for rule in &sheet.rules {
         out.push('\n');
-        emit_rule(&mut out, rule, "sheet", 0, opts)?;
+        emit_rule(&mut out, rule, "sheet", 0);
     }
     if !sheet.user_agent.is_empty() {
         out.push_str(
@@ -213,7 +255,7 @@ pub fn emit(sheet: &Sheet, opts: &EmitOptions) -> Result<String, String> {
         );
         for rule in &sheet.user_agent {
             out.push('\n');
-            emit_rule(&mut out, rule, "userAgent", 0, opts)?;
+            emit_rule(&mut out, rule, "userAgent", 0);
         }
         out.push_str(
             "\nlocal derive = Instance.new(\"StyleDerive\")\n\
@@ -224,10 +266,10 @@ pub fn emit(sheet: &Sheet, opts: &EmitOptions) -> Result<String, String> {
         );
     }
     out.push_str("\nreturn sheet\n");
-    Ok(out)
+    out
 }
 
-fn emit_rule(out: &mut String, rule: &Rule, parent: &str, depth: usize, opts: &EmitOptions) -> Result<(), String> {
+fn emit_rule(out: &mut String, rule: &Rule, parent: &str, depth: usize) {
     let indent = "\t".repeat(depth);
     let needs_handle = !rule.attributes.is_empty() || !rule.transitions.is_empty() || !rule.children.is_empty();
     // The property table sits one level deeper inside a `do` block.
@@ -238,7 +280,7 @@ fn emit_rule(out: &mut String, rule: &Rule, parent: &str, depth: usize, opts: &E
     } else {
         let mut s = String::from("{\n");
         for (k, v) in &rule.props {
-            let _ = writeln!(s, "{body}\t{} = {},", table_key(k), expression(v, opts)?);
+            let _ = writeln!(s, "{body}\t{} = {},", table_key(k), expression(v));
         }
         s.push_str(&body);
         s.push('}');
@@ -247,40 +289,39 @@ fn emit_rule(out: &mut String, rule: &Rule, parent: &str, depth: usize, opts: &E
     let call = format!("rule({parent}, {}, {priority}, {props})", string(&rule.selector));
     if !needs_handle {
         let _ = writeln!(out, "{indent}{call}");
-        return Ok(());
+        return;
     }
     let var = format!("r{}", depth + 1);
     let _ = writeln!(out, "{indent}do");
     let _ = writeln!(out, "{body}local {var} = {call}");
     for (name, value) in &rule.attributes {
-        let _ = writeln!(out, "{body}{var}:SetAttribute({}, {})", string(name), expression(value, opts)?);
+        let _ = writeln!(out, "{body}{var}:SetAttribute({}, {})", string(name), expression(value));
     }
     let (defaults, specific): (Vec<_>, Vec<_>) = rule.transitions.iter().partition(|(k, _)| k == "*");
     if !specific.is_empty() {
         let _ = writeln!(out, "{body}{var}:SetPropertyTransitions({{");
         for (k, t) in specific {
-            let _ = writeln!(out, "{body}\t{} = {},", table_key(k), tween_info(t)?);
+            let _ = writeln!(out, "{body}\t{} = {},", table_key(k), tween_info(t));
         }
         let _ = writeln!(out, "{body}}})");
     }
     if let Some((_, t)) = defaults.last() {
-        let _ = writeln!(out, "{body}{var}:SetDefaultPropertyTransition({})", tween_info(t)?);
+        let _ = writeln!(out, "{body}{var}:SetDefaultPropertyTransition({})", tween_info(t));
     }
     for child in &rule.children {
-        emit_rule(out, child, &var, depth + 1, opts)?;
+        emit_rule(out, child, &var, depth + 1);
     }
     let _ = writeln!(out, "{indent}end");
-    Ok(())
 }
 
 /// A value as a Luau expression.
-pub fn expression(v: &Value, opts: &EmitOptions) -> Result<String, String> {
-    Ok(match v {
+pub fn expression(v: &Value) -> String {
+    match v {
         Value::Bool(b) => b.to_string(),
         Value::Number(n) => number(*n),
         Value::String(s) => string(s),
         Value::Token(name) => string(&format!("${name}")),
-        Value::Enum { enum_type, item } => enum_item(enum_type, item)?,
+        Value::Enum(e) => enum_item(*e),
         Value::Color3(c) => color3(c),
         Value::UDim(u) => format!("UDim.new({}, {})", number(u.scale), number(u.offset)),
         Value::UDim2(x, y) => {
@@ -312,25 +353,20 @@ pub fn expression(v: &Value, opts: &EmitOptions) -> Result<String, String> {
         Value::Font { family, weight, style } => {
             let mut args = vec![string(family)];
             if weight.is_some() || style.is_some() {
-                args.push(enum_item("FontWeight", weight.as_deref().unwrap_or("Regular"))?);
+                args.push(enum_item(weight.unwrap_or(EnumItem::of("FontWeight", "Regular"))));
             }
             if let Some(style) = style {
-                args.push(enum_item("FontStyle", style)?);
+                args.push(enum_item(*style));
             }
             format!("Font.new({})", args.join(", "))
         }
-        Value::FontEnum(item) => format!("Font.fromEnum({})", enum_item("Font", item)?),
-        Value::Luau(code) if opts.allow_raw_luau => code.clone(),
-        Value::Luau(_) => return Err("raw Luau needs --allow-raw-luau".into()),
-    })
+        Value::FontEnum(item) => format!("Font.fromEnum({})", enum_item(*item)),
+        Value::Luau(code) => code.clone(),
+    }
 }
 
-fn tween_info(t: &TweenInfo) -> Result<String, String> {
-    let mut args = vec![
-        number(t.time),
-        enum_item("EasingStyle", &t.easing_style)?,
-        enum_item("EasingDirection", &t.easing_direction)?,
-    ];
+fn tween_info(t: &TweenInfo) -> String {
+    let mut args = vec![number(t.time), enum_item(t.easing_style), enum_item(t.easing_direction)];
     if t.repeat_count != 0.0 || t.reverses || t.delay_time != 0.0 {
         args.push(number(t.repeat_count));
         args.push(t.reverses.to_string());
@@ -338,17 +374,12 @@ fn tween_info(t: &TweenInfo) -> Result<String, String> {
     if t.delay_time != 0.0 {
         args.push(number(t.delay_time));
     }
-    Ok(format!("TweenInfo.new({})", args.join(", ")))
+    format!("TweenInfo.new({})", args.join(", "))
 }
 
-/// `Enum.<type>.<item>`, after checking both are plain identifiers.
-fn enum_item(enum_type: &str, item: &str) -> Result<String, String> {
-    for name in [enum_type, item] {
-        if !is_identifier(name) {
-            return Err(format!("`{name}` is not a valid Enum name"));
-        }
-    }
-    Ok(format!("Enum.{enum_type}.{item}"))
+/// `Enum.<type>.<item>`, with the names from `enums.txt`.
+fn enum_item(e: EnumItem) -> String {
+    format!("Enum.{}.{}", e.enum_type(), e.item())
 }
 
 fn color3(c: &Color3) -> String {
@@ -403,21 +434,9 @@ pub fn string(text: &str) -> String {
     s
 }
 
-/// Whether `name` can be written as a bare name in Luau.
-pub fn is_identifier(name: &str) -> bool {
-    const KEYWORDS: &[&str] = &[
-        "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "if", "in", "local", "nil", "not",
-        "or", "repeat", "return", "then", "true", "until", "while", "continue",
-    ];
-    let mut chars = name.chars();
-    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-        && !KEYWORDS.contains(&name)
-}
-
-/// A table key: `Name` or `["odd name"]`.
+/// A table key, always a string literal: a property name is the stylesheet's text.
 fn table_key(name: &str) -> String {
-    if is_identifier(name) { name.to_string() } else { format!("[{}]", string(name)) }
+    format!("[{}]", string(name))
 }
 
 // ----- JSON -----
@@ -467,8 +486,8 @@ fn tween_json(t: &TweenInfo) -> Json {
         "TweenInfo",
         vec![
             ("time", num(t.time)),
-            ("easingStyle", str(&t.easing_style)),
-            ("easingDirection", str(&t.easing_direction)),
+            ("easingStyle", str(t.easing_style.item())),
+            ("easingDirection", str(t.easing_direction.item())),
             ("repeatCount", num(t.repeat_count)),
             ("reverses", Json::Bool(t.reverses)),
             ("delayTime", num(t.delay_time)),
@@ -485,7 +504,7 @@ fn value_json(v: &Value) -> Json {
         Value::Number(n) => typed("number", vec![("value", num(*n))]),
         Value::String(s) => str(s),
         Value::Token(name) => typed("token", vec![("name", str(name))]),
-        Value::Enum { enum_type, item } => typed("Enum", vec![("enum", str(enum_type)), ("item", str(item))]),
+        Value::Enum(e) => typed("Enum", vec![("enum", str(e.enum_type())), ("item", str(e.item()))]),
         Value::Color3(c) => typed("Color3", vec![("r", num(c.r)), ("g", num(c.g)), ("b", num(c.b))]),
         Value::UDim(u) => typed("UDim", vec![("scale", num(u.scale)), ("offset", num(u.offset))]),
         Value::UDim2(x, y) => typed("UDim2", vec![("x", udim_json(x)), ("y", udim_json(y))]),
@@ -522,15 +541,15 @@ fn value_json(v: &Value) -> Json {
         Value::Font { family, weight, style } => {
             let mut fields = vec![("family", str(family))];
             if let Some(w) = weight {
-                fields.push(("weight", str(w)));
+                fields.push(("weight", str(w.item())));
             }
             if let Some(s) = style {
-                fields.push(("style", str(s)));
+                fields.push(("style", str(s.item())));
             }
             typed("Font", fields)
         }
-        Value::FontEnum(item) => typed("Font", vec![("enum", str(item))]),
-        Value::Luau(code) => typed("luau", vec![("code", str(code))]),
+        Value::FontEnum(item) => typed("Font", vec![("enum", str(item.item()))]),
+        Value::Luau(_) => unreachable!("to_json refuses a sheet with raw Luau before writing any value"),
     }
 }
 
@@ -559,7 +578,10 @@ fn rule_json(rule: &Rule) -> Json {
 }
 
 /// The sheet as a JSON document.
-pub fn to_json(sheet: &Sheet) -> String {
+pub fn to_json(sheet: &Sheet) -> Result<String, String> {
+    if uses_raw_luau(sheet) {
+        return Err("JSON holds the stylesheet as data, so it can't hold raw Luau from luau()".into());
+    }
     let doc = obj(vec![
         ("version", Json::Number(1.0)),
         ("name", str(&sheet.name)),
@@ -580,7 +602,17 @@ pub fn to_json(sheet: &Sheet) -> String {
     let mut out = String::new();
     write_json(&mut out, &doc, 0);
     out.push('\n');
-    out
+    Ok(out)
+}
+
+/// Whether any value in `sheet` is raw Luau.
+fn uses_raw_luau(sheet: &Sheet) -> bool {
+    fn rule(r: &Rule) -> bool {
+        r.props.iter().chain(&r.attributes).any(|(_, v)| matches!(v, Value::Luau(_))) || r.children.iter().any(rule)
+    }
+    let attributes = sheet.attributes.iter().chain(sheet.themes.iter().flat_map(|t| &t.attributes));
+    attributes.into_iter().any(|(_, v)| matches!(v, Value::Luau(_)))
+        || sheet.rules.iter().chain(&sheet.user_agent).any(rule)
 }
 
 /// Pretty-prints `v`, keeping any array or object that fits within 100 columns on one line.
@@ -668,21 +700,17 @@ fn json_string(out: &mut String, s: &str) {
 /// A value as Luau with the default options, for tests.
 #[cfg(test)]
 pub fn render(v: &Value) -> String {
-    expression(v, &EmitOptions { header: None, allow_raw_luau: true }).unwrap()
+    expression(v)
 }
 
 #[cfg(test)]
 pub fn render_tween(t: &TweenInfo) -> String {
-    tween_info(t).unwrap()
+    tween_info(t)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn opts() -> EmitOptions {
-        EmitOptions { header: None, allow_raw_luau: false }
-    }
 
     #[test]
     fn strings_cannot_break_out() {
@@ -692,28 +720,57 @@ mod tests {
     }
 
     #[test]
-    fn enum_names_must_be_identifiers() {
-        let v = Value::enum_item("Font", "Gotham");
-        assert_eq!(expression(&v, &opts()).unwrap(), "Enum.Font.Gotham");
-        let v = Value::enum_item("Font", "x) require(1");
-        assert!(expression(&v, &opts()).is_err());
-        assert!(tween_info(&TweenInfo::new(1.0, "Quad", "Out) require(1) (", 0.0)).is_err());
+    fn enum_items_come_only_from_the_table() {
+        assert_eq!(expression(&Value::enum_item("Font", "Gotham")), "Enum.Font.Gotham");
+        assert!(EnumItem::get("Font", "x) require(1)").is_none());
+        assert!(EnumItem::get("Workspace", "Gravity").is_none());
+        assert_eq!(EnumItem::of("AutomaticSize", "XY").value(), 3);
     }
 
     #[test]
-    fn raw_luau_needs_permission() {
-        let v = Value::Luau("require(1)".into());
-        assert!(expression(&v, &opts()).is_err());
-        let allowed = EmitOptions { allow_raw_luau: true, ..opts() };
-        assert_eq!(expression(&v, &allowed).unwrap(), "require(1)");
+    fn user_text_only_reaches_the_luau_inside_string_literals() {
+        // A property name, a selector, an attribute and a sheet name that would each be code if
+        // written bare.
+        let hostile = "x\"]) require(1) --";
+        let sheet = Sheet {
+            name: hostile.into(),
+            attributes: vec![(hostile.into(), Value::String(hostile.into()))],
+            rules: vec![Rule {
+                selector: hostile.into(),
+                props: vec![(hostile.into(), Value::Number(1.0))],
+                transitions: vec![(hostile.into(), TweenInfo::new(1.0, "Quad", "Out", 0.0))],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let out = emit(&sheet);
+        assert!(!out.contains("x\"]"), "{out}");
+        assert_eq!(out.matches(r#""x\"]) require(1) --""#).count(), 6, "{out}");
     }
 
     #[test]
-    fn header_stays_on_one_line() {
-        let sheet = Sheet { name: "x".into(), ..Default::default() };
-        let opts = EmitOptions { header: Some("from a\nrequire(1)\r--".into()), ..opts() };
-        let out = emit(&sheet, &opts).unwrap();
-        assert!(out.starts_with("-- from a require(1) --\n"), "{out}");
+    fn raw_luau_reaches_luau_but_never_json() {
+        let sheet = Sheet {
+            rules: vec![Rule {
+                selector: ".a".into(),
+                props: vec![("Text".into(), Value::Luau("game.Players.LocalPlayer.Name".into()))],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(emit(&sheet).contains(r#"["Text"] = game.Players.LocalPlayer.Name,"#));
+        assert!(to_json(&sheet).is_err());
+        let in_user_agent = Sheet { user_agent: sheet.rules.clone(), ..Default::default() };
+        assert!(to_json(&in_user_agent).is_err());
+    }
+
+    #[test]
+    fn the_header_holds_no_input_text() {
+        let sheet = Sheet { name: "a\nrequire(1)".into(), ..Default::default() };
+        let out = emit(&sheet);
+        let header = format!("-- Generated by outlass {}. Do not edit by hand.\n\n", env!("CARGO_PKG_VERSION"));
+        assert!(out.starts_with(&header), "{out}");
+        assert!(out.contains(r#"sheet.Name = "a\nrequire(1)""#), "{out}");
     }
 
     #[test]
@@ -732,7 +789,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let json = to_json(&sheet);
+        let json = to_json(&sheet).unwrap();
         assert!(
             json.contains(
                 r#""Size": {"type": "UDim2", "x": {"scale": 0.5, "offset": 10}, "y": {"scale": 0, "offset": 0}}"#

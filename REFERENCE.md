@@ -39,13 +39,16 @@ sheet:SetAttribute("Surface", Color3.fromRGB(31, 41, 55))
 
 local function rule(parent, selector, priority, properties) ... end
 
-rule(sheet, "TextLabel, TextButton, TextBox", 0, { RichText = true, ... })  -- the user-agent defaults
 rule(sheet, ".card", 1, {
-	BackgroundColor3 = "$Surface",
+	["BackgroundColor3"] = "$Surface",
 	...
 })
-rule(sheet, ".card::UICorner", 1, { CornerRadius = UDim.new(0, 6) })
-rule(sheet, ".card:Hover", 2, { BackgroundColor3 = Color3.fromRGB(49, 65, 88) })
+rule(sheet, ".card::UICorner", 1, { ["CornerRadius"] = UDim.new(0, 6) })
+rule(sheet, ".card:Hover", 2, { ["BackgroundColor3"] = Color3.fromRGB(49, 65, 88) })
+...
+-- the user-agent defaults, in a StyleSheet the sheet derives from (sheet.UserAgent)
+local userAgent = Instance.new("StyleSheet")
+rule(userAgent, "TextLabel, TextButton, TextBox", 1, { ["RichText"] = true, ... })
 ...
 return sheet
 ```
@@ -80,7 +83,8 @@ the same way: `UDim.new`, `UDim2.new`/`fromScale`/`fromOffset`, `Vector2.new`, `
 
 Anything else (another call, or a bare word that isn't an Enum item) is ignored with a warning, so a
 stylesheet can't put code into the generated module: it can only build a StyleSheet. `luau("...")` inserts
-raw Luau, but only with `--allow-raw-luau`; use it only for stylesheets you trust.
+raw Luau, but only with `--allow-raw-luau`; use it only for stylesheets you trust. JSON (`--emit json`) has
+no way to hold raw Luau, so a stylesheet that uses `luau()` can't be written as JSON (or as a model file).
 
 `--emit json` writes the compiled StyleSheet as JSON instead: the rules, their attributes and transitions,
 and every value typed (`{"type": "UDim2", "x": {"scale": 0, "offset": 4}, ...}`, `{"type": "Enum", "enum":
@@ -500,4 +504,4 @@ outlass functions [FILTER]
 ```
 
 Common options: `-o FILE|-`, `-d DIR`, `--merge`, `--approx[=GROUPS]`, `-I DIR`, `-D name=value`,
-`--emit luau|json|rbxmx|css`, `--tags FILE`, `--allow-raw-luau`, `--watch`, `-q`, `--strict`, `--deny-warnings`. See `outlass --help` for everything, with examples.
+`--emit luau|json|rbxmx|css`, `--tags FILE`, `--allow-raw-luau`, `--no-user-agent-styles`, `--watch`, `-q`, `--strict`, `--deny-warnings`. See `outlass --help` for everything, with examples.

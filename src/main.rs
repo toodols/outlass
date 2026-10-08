@@ -31,7 +31,7 @@ becomes `>>`; :hover → :Hover, :active → :Press, :disabled → :NonInteracta
 (Enum.Font.Gotham, UDim2.new(0, 10, 0, 20), Color3.fromRGB(...), colors like #fff, quoted \
 strings, numbers; px is dropped, 50% → 0.5, 1s/1000ms → 1). Anything else is ignored with a \
 warning, so the generated code can only build a StyleSheet; luau(\"...\") inserts raw Luau, but \
-only with --allow-raw-luau.
+only with --allow-raw-luau (and never into --emit json or rbxmx).
   * Custom properties (--Name: value) become StyleRule attributes (design tokens); in \
 :root or at the top level they go on the StyleSheet. [data-theme=\"dark\"] and \
 @media (prefers-color-scheme: dark) set a theme's tokens: theme StyleSheets the sheet derives from \
@@ -201,7 +201,7 @@ struct BuildArgs {
 
     /// Let `luau("...")` insert raw Luau into the generated code. Raw Luau can do anything a script
     /// can, so only allow it for stylesheets you trust; without it, the output can only build a
-    /// StyleSheet
+    /// StyleSheet. JSON and model files never hold it
     #[arg(long)]
     allow_raw_luau: bool,
 
@@ -500,12 +500,7 @@ fn parse_tags(text: &str) -> Result<HashMap<String, Vec<String>>, String> {
     Ok(tags)
 }
 
-fn codegen_options(
-    args: &BuildArgs,
-    sheet_name: &str,
-    header: Option<String>,
-    tags: &HashMap<String, Vec<String>>,
-) -> CodegenOptions {
+fn codegen_options(args: &BuildArgs, sheet_name: &str, tags: &HashMap<String, Vec<String>>) -> CodegenOptions {
     let values = ValueOptions { allow_raw_luau: args.allow_raw_luau };
     CodegenOptions {
         approx: ApproxOptions {
@@ -517,7 +512,6 @@ fn codegen_options(
         },
         values,
         sheet_name: sheet_name.to_string(),
-        header,
         tags: tags.clone(),
         user_agent_styles: !args.no_user_agent_styles,
     }
@@ -554,24 +548,11 @@ fn run_job(job: &Job, args: &BuildArgs, opts: &Options, tags: &HashMap<String, V
         }
     }
 
-    let label =
-        job.inputs
-            .iter()
-            .map(|p| {
-                if p.as_os_str().is_empty() {
-                    "<stdin>".to_string()
-                } else {
-                    p.display().to_string().replace('\\', "/")
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
+    let codegen = codegen_options(args, &job.sheet_name, tags);
     let output = match args.emit {
-        Emit::Luau => {
-            codegen::emit_luau(&combined, &codegen_options(args, &job.sheet_name, Some(label), tags), &mut diag)
-        }
-        Emit::Json => codegen::emit_json(&combined, &codegen_options(args, &job.sheet_name, None, tags), &mut diag),
-        Emit::Rbxmx => codegen::emit_rbxmx(&combined, &codegen_options(args, &job.sheet_name, None, tags), &mut diag),
+        Emit::Luau => codegen::emit_luau(&combined, &codegen, &mut diag),
+        Emit::Json => codegen::emit_json(&combined, &codegen, &mut diag),
+        Emit::Rbxmx => codegen::emit_rbxmx(&combined, &codegen, &mut diag),
         Emit::Css => codegen::emit_css(&combined),
     };
     print_diagnostics(&diag, args);

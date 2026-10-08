@@ -61,7 +61,7 @@ pub fn compile(
     };
 
     let sheet_name = entry_path.file_stem().and_then(|s| s.to_str()).unwrap_or("StyleSheet").to_string();
-    let codegen = |header: Option<String>| CodegenOptions {
+    let codegen = CodegenOptions {
         values: ValueOptions { allow_raw_luau: false },
         approx: ApproxOptions {
             groups: Group::expand(&groups),
@@ -70,15 +70,14 @@ pub fn compile(
             inherited_family: None,
             user_agent: false,
         },
-        sheet_name: sheet_name.clone(),
-        header,
+        sheet_name,
         tags: HashMap::new(),
         user_agent_styles: user_agent,
     };
     let output = match emit {
-        "luau" => codegen::emit_luau(&sheet, &codegen(Some(entry.to_string())), &mut diag),
-        "json" => codegen::emit_json(&sheet, &codegen(None), &mut diag),
-        "rbxmx" => codegen::emit_rbxmx(&sheet, &codegen(None), &mut diag),
+        "luau" => codegen::emit_luau(&sheet, &codegen, &mut diag),
+        "json" => codegen::emit_json(&sheet, &codegen, &mut diag),
+        "rbxmx" => codegen::emit_rbxmx(&sheet, &codegen, &mut diag),
         "css" => codegen::emit_css(&sheet),
         other => return Err(JsValue::from_str(&format!("unknown output `{other}`"))),
     };

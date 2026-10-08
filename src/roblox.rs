@@ -92,10 +92,11 @@ fn keyword(text: &str) -> Result<luau::Value, String> {
     }
     if let Some(rest) = text.strip_prefix("Enum.")
         && let Some((enum_type, item)) = rest.split_once('.')
-        && luau::is_identifier(enum_type)
-        && luau::is_identifier(item)
     {
-        return Ok(luau::Value::enum_item(enum_type, item));
+        return match luau::EnumItem::get(enum_type, item) {
+            Some(e) => Ok(luau::Value::Enum(e)),
+            None => Err(format!("`{text}` isn't an Enum item GUI objects use")),
+        };
     }
     Err(format!(
         "`{text}` isn't a Roblox value; quote it (\"{text}\") for a string, or write an Enum like Enum.Font.Gotham"
@@ -253,19 +254,17 @@ fn call(name: &str, args: &[Value], opts: &ValueOptions) -> Result<luau::Value, 
             if args.len() > 3 {
                 return Err(format!("{name}() takes at most 3 arguments"));
             }
-            let item = |i: usize, enum_type: &str| -> Result<Option<String>, String> {
+            let item = |i: usize, enum_type: &str| -> Result<Option<luau::EnumItem>, String> {
                 let Some(arg) = args.get(i) else { return Ok(None) };
                 match value(arg, opts)? {
-                    luau::Value::Enum { enum_type: t, item } if t == enum_type => Ok(Some(item)),
+                    luau::Value::Enum(e) if e.enum_type() == enum_type => Ok(Some(e)),
                     _ => Err(format!("{name}() expects an Enum.{enum_type} item, got `{}`", arg.inspect())),
                 }
             };
             luau::Value::Font { family, weight: item(1, "FontWeight")?, style: item(2, "FontStyle")? }
         }
         "Font.fromEnum" => match args.first().map(|a| value(a, opts)).transpose()? {
-            Some(luau::Value::Enum { enum_type, item }) if enum_type == "Font" && args.len() == 1 => {
-                luau::Value::FontEnum(item)
-            }
+            Some(luau::Value::Enum(e)) if e.enum_type() == "Font" && args.len() == 1 => luau::Value::FontEnum(e),
             _ => return Err("Font.fromEnum() takes an Enum.Font item".into()),
         },
         // A CSS function like `linear-gradient(...)` can't be a Luau call at all.
@@ -409,6 +408,9 @@ mod tests {
         assert!(value(&Value::str("a)require(4)"), &o).is_err());
         assert!(value(&Value::str("Enum.Font.Gotham)require(1)--"), &o).is_err());
         assert!(value(&Value::str("Enum.Font"), &o).is_err());
+        // Only Enum items from enums.txt.
+        assert!(value(&Value::str("Enum.Font.NotAFont"), &o).is_err());
+        assert!(value(&Value::str("Enum.Material.Plastic"), &o).is_err());
         // Raw Luau only with permission.
         let raw = call("luau", vec![Value::quoted("require(1)")]);
         assert!(value(&raw, &o).is_err());

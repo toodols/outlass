@@ -133,7 +133,7 @@ fn dash_output_prints_to_stdout_without_writing_a_file() {
 fn dash_input_reads_scss_from_stdin() {
     let (code, stdout, stderr) = run(&["-", "-o", "-"], Some(".a { BackgroundTransparency: 1 }"));
     assert_eq!(code, 0, "stderr: {stderr}");
-    assert!(stdout.contains("BackgroundTransparency = 1"), "stdout:\n{stdout}");
+    assert!(stdout.contains("[\"BackgroundTransparency\"] = 1"), "stdout:\n{stdout}");
 }
 
 // ---------- 4. --output / --merge ----------
@@ -205,13 +205,13 @@ fn approx_before_input_translates_opacity() {
     let input = dir.write("x.scss", ".a { opacity: 0.25; }\n");
     let (code, stdout, stderr) = run(&["--approx", input.to_str().unwrap(), "-o", "-"], None);
     assert_eq!(code, 0, "stderr: {stderr}");
-    assert!(stdout.contains("TextTransparency = 0.75"), "stdout:\n{stdout}");
+    assert!(stdout.contains("[\"TextTransparency\"] = 0.75"), "stdout:\n{stdout}");
 }
 
 #[test]
 fn approx_group_filter_translates_only_that_group() {
     let (stdout, stderr) = compile(".a { opacity: 0.25; border-radius: 4px; }", &["--approx=opacity"]);
-    assert!(stdout.contains("TextTransparency = 0.75"), "stdout:\n{stdout}");
+    assert!(stdout.contains("[\"TextTransparency\"] = 0.75"), "stdout:\n{stdout}");
     assert!(!stdout.contains("UICorner"), "border-radius should not have been translated:\n{stdout}");
     assert!(stderr.contains("--approx=box"), "stderr should point at the box group:\n{stderr}");
 }
@@ -229,13 +229,13 @@ fn no_approx_warns_and_drops_css_property() {
 fn define_overrides_default_declaration() {
     let (stdout, _stderr) =
         compile("$accent: red !default;\n.a { BackgroundColor3: $accent }", &["-D", "accent=#00ff00"]);
-    assert!(stdout.contains("BackgroundColor3 = Color3.fromRGB(0, 255, 0)"), "stdout:\n{stdout}");
+    assert!(stdout.contains("[\"BackgroundColor3\"] = Color3.fromRGB(0, 255, 0)"), "stdout:\n{stdout}");
 }
 
 #[test]
 fn non_default_declaration_still_wins_over_define() {
     let (stdout, _stderr) = compile("$accent: blue;\n.a { BackgroundColor3: $accent }", &["-D", "accent=#00ff00"]);
-    assert!(stdout.contains("BackgroundColor3 = Color3.fromRGB(0, 0, 255)"), "stdout:\n{stdout}");
+    assert!(stdout.contains("[\"BackgroundColor3\"] = Color3.fromRGB(0, 0, 255)"), "stdout:\n{stdout}");
 }
 
 // ---------- 8. -I / --load-path ----------
@@ -261,7 +261,7 @@ fn dot_sass_extension_is_autodetected() {
     let input = dir.write("auto.sass", ".a\n  BackgroundTransparency: 1\n");
     let (code, stdout, stderr) = run(&[input.to_str().unwrap(), "-o", "-"], None);
     assert_eq!(code, 0, "stderr: {stderr}");
-    assert!(stdout.contains("BackgroundTransparency = 1"), "stdout:\n{stdout}");
+    assert!(stdout.contains("[\"BackgroundTransparency\"] = 1"), "stdout:\n{stdout}");
 }
 
 // ---------- 10. the cascade and @layer ----------
@@ -316,7 +316,7 @@ fn important_declarations_beat_everything_normal() {
     let top = rules.iter().map(|(_, p)| p.parse::<f64>().unwrap()).fold(f64::MIN, f64::max);
     assert_eq!(a[1].1.parse::<f64>().unwrap(), top, "{out}");
     let important_part = &out[out.rfind("\".a\"").unwrap()..];
-    assert!(important_part[..important_part.find('}').unwrap()].contains("Color = 1"), "{out}");
+    assert!(important_part[..important_part.find('}').unwrap()].contains("[\"Color\"] = 1"), "{out}");
     assert!(!important_part[..important_part.find('}').unwrap()].contains("Other"), "{out}");
 }
 
@@ -343,13 +343,13 @@ fn colors_become_from_rgb() {
 #[test]
 fn rem_is_16px_on_roblox_properties() {
     let (stdout, _stderr) = compile(".a { TextSize: 2rem }", &[]);
-    assert!(stdout.contains("TextSize = 32"), "stdout:\n{stdout}");
+    assert!(stdout.contains("[\"TextSize\"] = 32"), "stdout:\n{stdout}");
 }
 
 #[test]
 fn rem_is_16px_in_approx_font_size() {
     let (stdout, _stderr) = compile(".a { font-size: 1.5rem }", &["--approx"]);
-    assert!(stdout.contains("TextSize = 24"), "stdout:\n{stdout}");
+    assert!(stdout.contains("[\"TextSize\"] = 24"), "stdout:\n{stdout}");
 }
 
 // ---------- 13. default font ----------
@@ -521,7 +521,7 @@ fn custom_property_in_root_goes_on_stylesheet() {
 #[test]
 fn var_reference_becomes_token_string() {
     let (stdout, _stderr) = compile(":root { --Brand: red; }\n.a { Color: var(--Brand); }", &[]);
-    assert!(stdout.contains(r#"Color = "$Brand""#), "stdout:\n{stdout}");
+    assert!(stdout.contains(r#"["Color"] = "$Brand""#), "stdout:\n{stdout}");
 }
 
 #[test]
@@ -538,9 +538,9 @@ fn nested_layers_rank_below_their_parents_own_rules() {
 fn grid_tracks_become_a_cell_count_and_cell_size() {
     let scss = ".grid {\n  display: grid;\n  grid-template-columns: repeat(3, 68px);\n  grid-auto-rows: 68px;\n  gap: 6px;\n}\n";
     let (stdout, stderr) = compile(scss, &["--approx"]);
-    assert!(stdout.contains("FillDirectionMaxCells = 3"), "stdout:\n{stdout}");
-    assert!(stdout.contains("CellSize = UDim2.new(0, 68, 0, 68)"), "stdout:\n{stdout}");
-    assert!(stdout.contains("CellPadding = UDim2.new(0, 6, 0, 6)"), "stdout:\n{stdout}");
+    assert!(stdout.contains("[\"FillDirectionMaxCells\"] = 3"), "stdout:\n{stdout}");
+    assert!(stdout.contains("[\"CellSize\"] = UDim2.new(0, 68, 0, 68)"), "stdout:\n{stdout}");
+    assert!(stdout.contains("[\"CellPadding\"] = UDim2.new(0, 6, 0, 6)"), "stdout:\n{stdout}");
     assert!(!stderr.contains("warning"), "stderr:\n{stderr}");
 }
 
@@ -585,7 +585,7 @@ fn media_features_with_documented_equivalents_use_builtin_queries() {
 fn other_media_queries_become_a_style_query_on_the_screen_gui() {
     let (out, stderr) = compile(".a { @media (min-width: 900px) and (orientation: landscape) { ZIndex: 2; } }", &[]);
     assert!(stderr.is_empty(), "{stderr}");
-    assert!(out.contains("rule(sheet, \"ScreenGui::StyleQuery #MediaMinWidth900MinAspect1\", nil, {\n\tMinSize = Vector2.new(900, 0),\n\tAspectRatioRange = NumberRange.new(1, math.huge),"), "{out}");
+    assert!(out.contains("rule(sheet, \"ScreenGui::StyleQuery #MediaMinWidth900MinAspect1\", nil, {\n\t[\"MinSize\"] = Vector2.new(900, 0),\n\t[\"AspectRatioRange\"] = NumberRange.new(1, math.huge),"), "{out}");
     assert!(out.contains("\"@MediaMinWidth900MinAspect1 .a\""), "{out}");
 }
 
@@ -625,9 +625,9 @@ fn nested_and_listed_queries() {
 #[test]
 fn value_units_are_converted() {
     let (stdout, _stderr) = compile(".vals {\n  Size: 10px;\n  Opacity: 50%;\n  Time: 1000ms;\n}\n", &[]);
-    assert!(stdout.contains("Size = 10"), "stdout:\n{stdout}");
-    assert!(stdout.contains("Opacity = 0.5"), "stdout:\n{stdout}");
-    assert!(stdout.contains("Time = 1"), "stdout:\n{stdout}");
+    assert!(stdout.contains("[\"Size\"] = 10"), "stdout:\n{stdout}");
+    assert!(stdout.contains("[\"Opacity\"] = 0.5"), "stdout:\n{stdout}");
+    assert!(stdout.contains("[\"Time\"] = 1"), "stdout:\n{stdout}");
 }
 
 // ----- regressions found during review -----
@@ -635,15 +635,15 @@ fn value_units_are_converted() {
 #[test]
 fn grid_gap_does_not_create_list_layout() {
     let (out, _) = compile(".g { display: grid; gap: 4px 8px; }", &["--approx"]);
-    assert!(out.contains("CellPadding = UDim2.new(0, 8, 0, 4)"), "{out}");
+    assert!(out.contains("[\"CellPadding\"] = UDim2.new(0, 8, 0, 4)"), "{out}");
     assert!(!out.contains("UIListLayout"), "grid gap leaked into a UIListLayout:\n{out}");
 }
 
 #[test]
 fn clamp_folds_compatible_numbers() {
     let (out, _) = compile(".a { TextSize: clamp(10px, 30px, 24px); ZIndex: clamp(1, 0, 5); }", &[]);
-    assert!(out.contains("TextSize = 24"), "{out}");
-    assert!(out.contains("ZIndex = 1"), "{out}");
+    assert!(out.contains("[\"TextSize\"] = 24"), "{out}");
+    assert!(out.contains("[\"ZIndex\"] = 1"), "{out}");
 }
 
 #[test]
@@ -662,7 +662,7 @@ fn raw_color_alpha_is_warned_about() {
 #[test]
 fn single_axis_size_warns() {
     let (out, stderr) = compile(".a { height: 48px; }", &["--approx=size"]);
-    assert!(out.contains("AutomaticSize = Enum.AutomaticSize.X"), "{out}");
+    assert!(out.contains("[\"AutomaticSize\"] = Enum.AutomaticSize.X"), "{out}");
     assert!(stderr.contains("only `height` is set"), "{stderr}");
 }
 
@@ -674,9 +674,9 @@ fn absolute_edges_stretch_like_css() {
         ".fill { position: absolute; inset: 0; } .bar { position: absolute; top: 8px; left: 12px; right: 12px; height: 4px; }",
         &["--approx"],
     );
-    assert!(out.contains("Size = UDim2.new(1, 0, 1, 0)"), "{out}");
-    assert!(out.contains("Size = UDim2.new(1, -24, 0, 4)"), "{out}");
-    assert!(out.contains("Position = UDim2.new(0, 12, 0, 8)"), "{out}");
+    assert!(out.contains("[\"Size\"] = UDim2.new(1, 0, 1, 0)"), "{out}");
+    assert!(out.contains("[\"Size\"] = UDim2.new(1, -24, 0, 4)"), "{out}");
+    assert!(out.contains("[\"Position\"] = UDim2.new(0, 12, 0, 8)"), "{out}");
     assert!(!stderr.contains("both set"), "{stderr}");
     assert!(!stderr.contains("only `height`"), "{stderr}");
 }
@@ -688,15 +688,15 @@ fn composite_properties_cascade_per_axis() {
         &["--approx"],
     );
     let left_rule = &out[out.find("\".bar.left\"").unwrap()..];
-    assert!(left_rule.contains("Position = UDim2.new(0.34, 0, 0, 36)"), "{out}");
+    assert!(left_rule.contains("[\"Position\"] = UDim2.new(0.34, 0, 0, 36)"), "{out}");
 }
 
 #[test]
 fn opacity_fades_canvas_groups() {
     let (out, _) = compile(".card { opacity: 0.25; transition: opacity 0.2s ease-out; }", &["--approx"]);
-    assert!(out.contains("GroupTransparency = 0.75"), "{out}");
-    assert!(out.contains("TextTransparency = 0.75"), "{out}");
-    assert!(out.contains("GroupTransparency = TweenInfo.new(0.2"), "{out}");
+    assert!(out.contains("[\"GroupTransparency\"] = 0.75"), "{out}");
+    assert!(out.contains("[\"TextTransparency\"] = 0.75"), "{out}");
+    assert!(out.contains("[\"GroupTransparency\"] = TweenInfo.new(0.2"), "{out}");
 }
 
 #[test]
@@ -705,8 +705,8 @@ fn mask_image_becomes_gradient_transparency() {
         ".track { mask-image: linear-gradient(to right, transparent, black 14%, black 86%, transparent); }",
         &["--approx"],
     );
-    assert!(out.contains("Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.14, 0), NumberSequenceKeypoint.new(0.86, 0), NumberSequenceKeypoint.new(1, 1)})"), "{out}");
-    assert!(out.contains("Rotation = 0"), "{out}");
+    assert!(out.contains("[\"Transparency\"] = NumberSequence.new({NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.14, 0), NumberSequenceKeypoint.new(0.86, 0), NumberSequenceKeypoint.new(1, 1)})"), "{out}");
+    assert!(out.contains("[\"Rotation\"] = 0"), "{out}");
     assert!(!stderr.contains("mask-image"), "{stderr}");
 }
 
@@ -716,9 +716,9 @@ fn gradient_text_idiom() {
         ".gold { background: linear-gradient(#ffe29a, #ffb347); background-clip: text; color: transparent; }",
         &["--approx"],
     );
-    assert!(out.contains("TextColor3 = Color3.fromRGB(255, 255, 255)"), "{out}");
-    assert!(out.contains("BackgroundTransparency = 1"), "{out}");
-    assert!(!out.contains("TextTransparency = 1"), "text must stay visible:\n{out}");
+    assert!(out.contains("[\"TextColor3\"] = Color3.fromRGB(255, 255, 255)"), "{out}");
+    assert!(out.contains("[\"BackgroundTransparency\"] = 1"), "{out}");
+    assert!(!out.contains("[\"TextTransparency\"] = 1"), "text must stay visible:\n{out}");
     assert!(out.contains("\".gold::UIGradient\""), "{out}");
     assert!(stderr.is_empty(), "{stderr}");
 }
@@ -740,22 +740,22 @@ fn cubic_bezier_maps_to_roblox_easing() {
 fn transitions_reach_pseudo_instances() {
     let (out, _) = compile(".pop { transform: scale(1); transition: transform 0.2s ease-out; }", &["--approx"]);
     let scale_rule = &out[out.find("\".pop::UIScale\"").unwrap()..];
-    assert!(scale_rule.contains("Scale = TweenInfo.new(0.2"), "{out}");
+    assert!(scale_rule.contains("[\"Scale\"] = TweenInfo.new(0.2"), "{out}");
 }
 
 #[test]
 fn borders_clear_the_legacy_border() {
     let (out, _) = compile("Frame { border: none; } .card { border: 1px solid #fff; }", &["--approx"]);
     // Both rules, and the user-agent default under every GuiObject (a CSS box has no border).
-    assert_eq!(out.matches("BorderSizePixel = 0").count(), 3, "{out}");
-    assert!(out.contains("Enabled = false"), "{out}");
-    assert!(out.contains("Enabled = true"), "{out}");
+    assert_eq!(out.matches("[\"BorderSizePixel\"] = 0").count(), 3, "{out}");
+    assert!(out.contains("[\"Enabled\"] = false"), "{out}");
+    assert!(out.contains("[\"Enabled\"] = true"), "{out}");
 }
 
 #[test]
 fn background_none_only_clears_the_background() {
     let (out, _) = compile(".label { background: none; }", &["--approx"]);
-    assert!(out.contains("BackgroundTransparency = 1"), "{out}");
+    assert!(out.contains("[\"BackgroundTransparency\"] = 1"), "{out}");
     assert!(!out.contains("BackgroundColor3"), "{out}");
 }
 
@@ -771,7 +771,7 @@ fn repeating_linear_gradient_is_written_out_stop_by_stop() {
     // Five copies of the two-color pattern, each ending in a hard stop (two keypoints at one time).
     assert_eq!(gradient[..gradient.find('}').unwrap()].matches("ColorSequenceKeypoint.new(").count(), 20, "{out}");
     assert!(gradient.contains(r##"ColorSequenceKeypoint.new(0, Color3.fromRGB(34, 34, 34)), ColorSequenceKeypoint.new(0.1, Color3.fromRGB(34, 34, 34)), ColorSequenceKeypoint.new(0.1, Color3.fromRGB(68, 68, 68)), ColorSequenceKeypoint.new(0.2, Color3.fromRGB(68, 68, 68)), ColorSequenceKeypoint.new(0.2, Color3.fromRGB(34, 34, 34))"##), "{out}");
-    assert!(gradient.contains("Rotation = -45"), "{out}");
+    assert!(gradient.contains("[\"Rotation\"] = -45"), "{out}");
     assert!(stderr.is_empty(), "{stderr}");
 
     // A mask repeats the same way, and its hard stops survive as two keypoints at one time.
@@ -832,7 +832,7 @@ fn a_gradient_is_painted_over_the_background_color_like_css() {
         ".plate { background-color: #204060; background-image: linear-gradient(#ffffff, #000000); }",
         &["--approx"],
     );
-    assert!(out.contains(r##"BackgroundColor3 = Color3.fromRGB(255, 255, 255)"##), "{out}");
+    assert!(out.contains(r##"["BackgroundColor3"] = Color3.fromRGB(255, 255, 255)"##), "{out}");
     assert!(
         !out.contains(r##"Color3.fromRGB(32, 64, 96)"##),
         "an opaque gradient hides the color:
@@ -848,7 +848,7 @@ fn a_gradient_is_painted_over_the_background_color_like_css() {
     );
     assert!(out.contains(r##"ColorSequenceKeypoint.new(0, Color3.fromRGB(128, 0, 0))"##), "{out}");
     assert!(
-        !out.contains("Transparency = NumberSequence"),
+        !out.contains("[\"Transparency\"] = NumberSequence"),
         "the blend is opaque:
 {out}"
     );
@@ -857,7 +857,7 @@ fn a_gradient_is_painted_over_the_background_color_like_css() {
     let (out, _) = compile(".fade { background-image: linear-gradient(#f00, transparent); }", &["--approx"]);
     assert!(
         out.contains(
-            "Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(1, 1)})"
+            "[\"Transparency\"] = NumberSequence.new({NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(1, 1)})"
         ),
         "{out}"
     );
@@ -867,7 +867,7 @@ fn a_gradient_is_painted_over_the_background_color_like_css() {
 fn text_stroke_survives_a_border_reset() {
     let (out, _) = compile("TextLabel { border: none; } .title { -webkit-text-stroke: 1px black; }", &["--approx"]);
     let title = &out[out.find("\".title::UIStroke\"").unwrap()..];
-    assert!(title[..title.find('}').unwrap()].contains("Enabled = true"), "{out}");
+    assert!(title[..title.find('}').unwrap()].contains("[\"Enabled\"] = true"), "{out}");
 }
 
 #[test]
@@ -883,13 +883,13 @@ fn webkit_text_stroke_longhands_and_current_color() {
         &["--approx"],
     );
     let a = &out[out.find("\".a::UIStroke\"").unwrap()..];
-    assert!(a[..a.find('}').unwrap()].contains(r##"Color = Color3.fromRGB(255, 0, 0)"##), "{out}");
+    assert!(a[..a.find('}').unwrap()].contains(r##"["Color"] = Color3.fromRGB(255, 0, 0)"##), "{out}");
     let b = &out[out.find("\".b::UIStroke\"").unwrap()..];
     let b = &b[..b.find('}').unwrap()];
-    assert!(b.contains("Thickness = 1") && b.contains(r##"Color = Color3.fromRGB(0, 255, 0)"##), "{out}");
+    assert!(b.contains("[\"Thickness\"] = 1") && b.contains(r##"["Color"] = Color3.fromRGB(0, 255, 0)"##), "{out}");
     // A zero width draws nothing, and says so, so it can undo a weaker rule's stroke.
     let c = &out[out.find("\".c::UIStroke\"").unwrap()..];
-    assert!(c[..c.find('}').unwrap()].contains("Enabled = false"), "{out}");
+    assert!(c[..c.find('}').unwrap()].contains("[\"Enabled\"] = false"), "{out}");
     assert!(stderr.is_empty(), "{stderr}");
 }
 
@@ -917,7 +917,7 @@ fn cascaded_state_rules_do_not_add_properties() {
     let positive = &positive[..positive.find('}').unwrap()];
     assert!(positive.contains("TextColor3"), "{out}");
     assert!(
-        positive.contains("TextTransparency = 1"),
+        positive.contains("[\"TextTransparency\"] = 1"),
         "the inherited `opacity: 0` still applies:
 {out}"
     );
@@ -935,15 +935,15 @@ fn an_opaque_color_undoes_a_weaker_rules_transparency() {
     );
     let solid = &out[out.find("\".panel.solid\"").unwrap()..];
     let solid = &solid[..solid.find('}').unwrap()];
-    assert!(solid.contains("BackgroundTransparency = 0"), "{out}");
-    assert!(solid.contains("TextTransparency = 0"), "{out}");
+    assert!(solid.contains("[\"BackgroundTransparency\"] = 0"), "{out}");
+    assert!(solid.contains("[\"TextTransparency\"] = 0"), "{out}");
     assert!(priority_of(&out, ".panel.solid") > priority_of(&out, ".panel"), "{out}");
 }
 
 #[test]
 fn utf8_byte_order_mark_is_ignored() {
     let (out, _) = compile("\u{FEFF}// comment\n.a { ZIndex: 2; }", &[]);
-    assert!(out.contains("ZIndex = 2"), "{out}");
+    assert!(out.contains("[\"ZIndex\"] = 2"), "{out}");
 }
 
 #[test]
@@ -958,7 +958,7 @@ fn transition_only_pseudo_rules_are_limited_to_neutral_classes() {
 #[test]
 fn stroke_resets_are_dropped_when_nothing_enables_a_stroke() {
     let (out, _) = compile("Frame { border: none; }", &["--approx"]);
-    assert!(out.contains("BorderSizePixel = 0"), "{out}");
+    assert!(out.contains("[\"BorderSizePixel\"] = 0"), "{out}");
     assert!(!out.contains("UIStroke"), "{out}");
     let (out, _) = compile("Frame { border: none; } .card { border: 1px solid red; }", &["--approx"]);
     assert!(out.contains("\"Frame::UIStroke\""), "the reset matters once a stroke exists:\n{out}");
@@ -968,7 +968,7 @@ fn stroke_resets_are_dropped_when_nothing_enables_a_stroke() {
 fn zero_percent_translate_still_sets_the_anchor() {
     let (out, _) =
         compile(".tl { position: absolute; left: 0%; top: 0%; transform: translate(-0%, -0%); }", &["--approx"]);
-    assert!(out.contains("AnchorPoint = Vector2.new(0, 0)"), "{out}");
+    assert!(out.contains("[\"AnchorPoint\"] = Vector2.new(0, 0)"), "{out}");
 }
 
 #[test]
@@ -980,8 +980,8 @@ fn fit_content_sizes_from_the_content_even_over_a_weaker_size() {
     // AutomaticSize only grows an element past its Size, so a weaker rule's Size has to be zeroed.
     for selector in [".as-x", ".row > .wide"] {
         let rule = rule_of(&out, selector);
-        assert!(rule.contains("Size = UDim2.new(0, 0, 0, 0)"), "{out}");
-        assert!(rule.contains("AutomaticSize = Enum.AutomaticSize.XY"), "{out}");
+        assert!(rule.contains("[\"Size\"] = UDim2.new(0, 0, 0, 0)"), "{out}");
+        assert!(rule.contains("[\"AutomaticSize\"] = Enum.AutomaticSize.XY"), "{out}");
     }
     assert!(!stderr.contains("only `width`"), "{stderr}");
 }
@@ -991,26 +991,26 @@ fn display_flex_only_forces_visible_when_something_hides() {
     let (out, _) = compile(".row { display: flex; }", &["--approx"]);
     assert!(!out.contains("Visible"), "{out}");
     let (out, _) = compile(".row { display: flex; } .row.gone { display: none; }", &["--approx"]);
-    assert!(out.contains("Visible = true"), "{out}");
-    assert!(out.contains("Visible = false"), "{out}");
+    assert!(out.contains("[\"Visible\"] = true"), "{out}");
+    assert!(out.contains("[\"Visible\"] = false"), "{out}");
 }
 
 #[test]
 fn content_and_appearance_map_to_text_and_auto_button_color() {
     let (out, stderr) = compile("TextButton { content: \"\"; appearance: none; }", &["--approx"]);
-    assert!(out.contains("Text = \"\""), "{out}");
-    assert!(out.contains("AutoButtonColor = false"), "{out}");
+    assert!(out.contains("[\"Text\"] = \"\""), "{out}");
+    assert!(out.contains("[\"AutoButtonColor\"] = false"), "{out}");
     assert!(stderr.is_empty(), "{stderr}");
 }
 
 #[test]
 fn rich_text_is_on_by_default_below_every_rule() {
     let (out, _) = compile(".plain { RichText: false; }", &[]);
-    assert!(rule_of(&out, "TextLabel, TextButton, TextBox").contains("RichText = true,"), "{out}");
+    assert!(rule_of(&out, "TextLabel, TextButton, TextBox").contains("[\"RichText\"] = true,"), "{out}");
     // Text wraps by default, as `white-space: normal` does in CSS.
     let (wrapped, _) = compile(".nowrap { white-space: nowrap; }", &["--approx"]);
-    assert!(rule_of(&wrapped, "TextLabel, TextButton, TextBox").contains("TextWrapped = true,"), "{wrapped}");
-    assert!(wrapped.contains("TextWrapped = false"), "an author rule must be able to opt out:\n{wrapped}");
+    assert!(rule_of(&wrapped, "TextLabel, TextButton, TextBox").contains("[\"TextWrapped\"] = true,"), "{wrapped}");
+    assert!(wrapped.contains("[\"TextWrapped\"] = false"), "an author rule must be able to opt out:\n{wrapped}");
     assert!(priority_of(&out, ".plain") > 0.0, "an author rule must override the default:\n{out}");
 }
 
@@ -1023,9 +1023,12 @@ fn elements_are_content_sized_by_default_and_a_css_size_turns_that_off() {
         &out,
         "Frame, TextLabel, TextButton, TextBox, ImageLabel, ImageButton, ScrollingFrame, CanvasGroup, VideoFrame, ViewportFrame",
     );
-    assert!(every_class.contains("AutomaticSize = Enum.AutomaticSize.XY,"), "{out}");
-    assert!(out.contains("Size = UDim2.new(0, 100, 0, 20),\n\tAutomaticSize = Enum.AutomaticSize.None,"), "{out}");
-    assert!(rule_of(&out, ".grow").contains("AutomaticSize = Enum.AutomaticSize.XY,"), "{out}");
+    assert!(every_class.contains("[\"AutomaticSize\"] = Enum.AutomaticSize.XY,"), "{out}");
+    assert!(
+        out.contains("[\"Size\"] = UDim2.new(0, 100, 0, 20),\n\t[\"AutomaticSize\"] = Enum.AutomaticSize.None,"),
+        "{out}"
+    );
+    assert!(rule_of(&out, ".grow").contains("[\"AutomaticSize\"] = Enum.AutomaticSize.XY,"), "{out}");
     // Without the size approximations nothing translates to AutomaticSize, so the default is not
     // overridable and isn't emitted.
     let (out, _) = compile(".chip { Size: UDim2.new(0, 100, 0, 20); }", &[]);
@@ -1110,7 +1113,7 @@ fn opacity_scales_the_background_instead_of_replacing_it() {
     let a = &out[out.find("\".a\"").unwrap()..];
     let a = &a[..a.find('}').unwrap()];
     assert!(!a.contains("BackgroundTransparency"), "{out}");
-    assert!(a.contains("TextTransparency = 0.25"), "{out}");
+    assert!(a.contains("[\"TextTransparency\"] = 0.25"), "{out}");
 
     // A background it does inherit is scaled, and so is an inherited border.
     let (out, _) = compile(
@@ -1119,11 +1122,11 @@ fn opacity_scales_the_background_instead_of_replacing_it() {
     );
     let hover = &out[out.find("\".a:Hover\"").unwrap()..];
     let hover = &hover[..hover.find('}').unwrap()];
-    assert!(hover.contains("BackgroundTransparency = 0.75"), "{out}");
+    assert!(hover.contains("[\"BackgroundTransparency\"] = 0.75"), "{out}");
     assert!(!hover.contains("BackgroundColor3"), "{out}");
     let stroke = &out[out.find("\".a:Hover::UIStroke\"").unwrap()..];
     let stroke = &stroke[..stroke.find('}').unwrap()];
-    assert!(stroke.contains("Transparency = 0.5"), "{out}");
+    assert!(stroke.contains("[\"Transparency\"] = 0.5"), "{out}");
     assert!(!stroke.contains("Thickness"), "{out}");
 }
 
@@ -1134,19 +1137,19 @@ fn scrolling_frames_size_their_canvas_to_the_content() {
     let (out, _) = compile(".list { overflow-y: auto; } .list.wide { overflow-x: scroll; }", &["--approx"]);
     let ua = &out[out.find("\"ScrollingFrame\"").unwrap()..];
     let ua = &ua[..ua.find('}').unwrap()];
-    assert!(ua.contains("AutomaticCanvasSize = Enum.AutomaticSize.XY"), "{out}");
-    assert!(ua.contains("CanvasSize = UDim2.new(0, 0, 0, 0)"), "{out}");
+    assert!(ua.contains("[\"AutomaticCanvasSize\"] = Enum.AutomaticSize.XY"), "{out}");
+    assert!(ua.contains("[\"CanvasSize\"] = UDim2.new(0, 0, 0, 0)"), "{out}");
 
     let list = &out[out.find("\".list\"").unwrap()..];
     let list = &list[..list.find('}').unwrap()];
-    assert!(list.contains("ScrollingDirection = Enum.ScrollingDirection.Y"), "{out}");
-    assert!(list.contains("AutomaticCanvasSize = Enum.AutomaticSize.Y"), "{out}");
+    assert!(list.contains("[\"ScrollingDirection\"] = Enum.ScrollingDirection.Y"), "{out}");
+    assert!(list.contains("[\"AutomaticCanvasSize\"] = Enum.AutomaticSize.Y"), "{out}");
 
     // `.list.wide` inherits `overflow-y: auto` from `.list`, so it scrolls both ways.
     let wide = &out[out.find("\".list.wide\"").unwrap()..];
     let wide = &wide[..wide.find('}').unwrap()];
-    assert!(wide.contains("ScrollingDirection = Enum.ScrollingDirection.XY"), "{out}");
-    assert!(wide.contains("AutomaticCanvasSize = Enum.AutomaticSize.XY"), "{out}");
+    assert!(wide.contains("[\"ScrollingDirection\"] = Enum.ScrollingDirection.XY"), "{out}");
+    assert!(wide.contains("[\"AutomaticCanvasSize\"] = Enum.AutomaticSize.XY"), "{out}");
 }
 
 #[test]
@@ -1156,13 +1159,13 @@ fn scrollbar_width_is_translated_not_rejected() {
         &["--approx"],
     );
     assert!(!stderr.contains("no Roblox equivalent"), "{stderr}");
-    assert!(out.contains("ScrollBarThickness = 8"), "{out}");
-    assert!(out.contains("ScrollBarImageColor3 = Color3.fromRGB(136, 136, 136)"), "{out}");
-    assert!(out.contains("ScrollBarImageTransparency = TweenInfo.new(0.2"), "{out}");
+    assert!(out.contains("[\"ScrollBarThickness\"] = 8"), "{out}");
+    assert!(out.contains("[\"ScrollBarImageColor3\"] = Color3.fromRGB(136, 136, 136)"), "{out}");
+    assert!(out.contains("[\"ScrollBarImageTransparency\"] = TweenInfo.new(0.2"), "{out}");
     // `:hover`'s opacity fades the thumb `.list` gives it.
     let hover = &out[out.find("\".list:Hover\"").unwrap()..];
     let hover = &hover[..hover.find('}').unwrap()];
-    assert!(hover.contains("ScrollBarImageTransparency = 0.5"), "{out}");
+    assert!(hover.contains("[\"ScrollBarImageTransparency\"] = 0.5"), "{out}");
     assert!(!hover.contains("ScrollBarImageColor3"), "{out}");
 }
 
@@ -1181,7 +1184,7 @@ fn unknown_fonts_warn_and_fall_back_like_css() {
     assert!(stderr.contains("using `Source Sans Pro`"), "{stderr}");
     assert!(out.contains("Font.new(\"rbxasset://fonts/families/SourceSansPro.json\", Enum.FontWeight.Bold"), "{out}");
     // Roblox's TextSize is a line's height: 20px x Source Sans Pro's 1.257.
-    assert!(out.contains("TextSize = 25"), "{out}");
+    assert!(out.contains("[\"TextSize\"] = 25"), "{out}");
 
     // Built-in names in any spacing or case, generic families and uploaded fonts are all fine.
     let (out, stderr) = compile(
@@ -1214,14 +1217,16 @@ fn flex_items_stretch_by_default_but_sized_axes_keep_their_size() {
         &["--approx"],
     );
     assert!(
-        rule_of(&out, ".row::UIListLayout").contains("ItemLineAlignment = Enum.ItemLineAlignment.Stretch"),
+        rule_of(&out, ".row::UIListLayout").contains("[\"ItemLineAlignment\"] = Enum.ItemLineAlignment.Stretch"),
         "{out}"
     );
     // Any other alignment has to undo the stretch a weaker `display: flex` rule gave.
-    assert!(rule_of(&out, ".row.mid::UIListLayout").contains("ItemLineAlignment = Enum.ItemLineAlignment.Automatic"));
+    assert!(
+        rule_of(&out, ".row.mid::UIListLayout").contains("[\"ItemLineAlignment\"] = Enum.ItemLineAlignment.Automatic")
+    );
     // Roblox stretches explicitly sized items too; a MaxSize at their own size keeps them out of it.
-    assert!(rule_of(&out, ".icon::UISizeConstraint").contains("MaxSize = Vector2.new(16, 16)"), "{out}");
-    assert!(rule_of(&out, ".bar::UISizeConstraint").contains("MaxSize = Vector2.new(math.huge, 4)"), "{out}");
+    assert!(rule_of(&out, ".icon::UISizeConstraint").contains("[\"MaxSize\"] = Vector2.new(16, 16)"), "{out}");
+    assert!(rule_of(&out, ".bar::UISizeConstraint").contains("[\"MaxSize\"] = Vector2.new(math.huge, 4)"), "{out}");
     // A cap would stop an item from growing along the line.
     assert!(!out.contains("\".grow::UISizeConstraint\""), "{out}");
 }
@@ -1236,13 +1241,16 @@ fn a_scrolling_axis_is_never_capped_at_the_window() {
          .box { width: 300px; height: 100px; } .box.scrolls { overflow: auto; }",
         &["--approx"],
     );
-    assert!(rule_of(&out, ".log::UISizeConstraint").contains("MaxSize = Vector2.new(300, math.huge)"), "{out}");
+    assert!(rule_of(&out, ".log::UISizeConstraint").contains("[\"MaxSize\"] = Vector2.new(300, math.huge)"), "{out}");
     // The scrolling comes from a weaker rule.
-    assert!(rule_of(&out, ".hug.fixed::UISizeConstraint").contains("MaxSize = Vector2.new(300, math.huge)"), "{out}");
-    // Scrolling lifts a weaker rule's cap.
-    assert!(rule_of(&out, ".box::UISizeConstraint").contains("MaxSize = Vector2.new(300, 100)"), "{out}");
     assert!(
-        rule_of(&out, ".box.scrolls::UISizeConstraint").contains("MaxSize = Vector2.new(math.huge, math.huge)"),
+        rule_of(&out, ".hug.fixed::UISizeConstraint").contains("[\"MaxSize\"] = Vector2.new(300, math.huge)"),
+        "{out}"
+    );
+    // Scrolling lifts a weaker rule's cap.
+    assert!(rule_of(&out, ".box::UISizeConstraint").contains("[\"MaxSize\"] = Vector2.new(300, 100)"), "{out}");
+    assert!(
+        rule_of(&out, ".box.scrolls::UISizeConstraint").contains("[\"MaxSize\"] = Vector2.new(math.huge, math.huge)"),
         "{out}"
     );
 }
@@ -1257,11 +1265,14 @@ fn flex_rows_let_their_items_shrink_like_css() {
     );
     // Below every author rule, so an item's own `flex` wins.
     let row = rule_of(&out, ".row > GuiObject::UIFlexItem");
-    assert!(row.contains("FlexMode = Enum.UIFlexMode.Shrink") && row.contains("ShrinkRatio = 1"), "{out}");
+    assert!(row.contains("[\"FlexMode\"] = Enum.UIFlexMode.Shrink") && row.contains("[\"ShrinkRatio\"] = 1"), "{out}");
     assert!(row.contains(", -"), "a negative priority:\n{out}");
-    assert!(rule_of(&out, ".item::UIFlexItem").contains("FlexMode = Enum.UIFlexMode.None"), "{out}");
+    assert!(rule_of(&out, ".item::UIFlexItem").contains("[\"FlexMode\"] = Enum.UIFlexMode.None"), "{out}");
     // A column would crush its content-sized items, and a scrolling row squeeze them into the window.
-    assert!(rule_of(&out, ".row.down > GuiObject::UIFlexItem").contains("FlexMode = Enum.UIFlexMode.None"), "{out}");
+    assert!(
+        rule_of(&out, ".row.down > GuiObject::UIFlexItem").contains("[\"FlexMode\"] = Enum.UIFlexMode.None"),
+        "{out}"
+    );
     assert!(!out.contains("\".col > GuiObject::UIFlexItem\""), "{out}");
     assert!(!out.contains("\".strip > GuiObject::UIFlexItem\""), "{out}");
     assert!(out.contains("\"@PreferredInputTouch .touch > GuiObject::UIFlexItem\""), "{out}");
@@ -1271,8 +1282,8 @@ fn flex_rows_let_their_items_shrink_like_css() {
 fn max_width_and_min_width_combine_with_the_stretch_cap() {
     let (out, _) = compile(".a { width: 300px; height: 20px; max-width: 200px; min-height: 30px; }", &["--approx"]);
     let cap = rule_of(&out, ".a::UISizeConstraint");
-    assert!(cap.contains("MaxSize = Vector2.new(200, 30)"), "{out}");
-    assert!(cap.contains("MinSize = Vector2.new(0, 30)"), "{out}");
+    assert!(cap.contains("[\"MaxSize\"] = Vector2.new(200, 30)"), "{out}");
+    assert!(cap.contains("[\"MinSize\"] = Vector2.new(0, 30)"), "{out}");
 }
 
 #[test]
@@ -1284,14 +1295,14 @@ fn margins_offset_positioned_elements_like_css() {
         &["--approx"],
     );
     let card = rule_of(&out, ".card");
-    assert!(card.contains("Size = UDim2.new(1, -16, 1, -16)"), "{out}");
-    assert!(card.contains("Position = UDim2.new(0, 8, 0, 8)"), "{out}");
+    assert!(card.contains("[\"Size\"] = UDim2.new(1, -16, 1, -16)"), "{out}");
+    assert!(card.contains("[\"Position\"] = UDim2.new(0, 8, 0, 8)"), "{out}");
     let pin = rule_of(&out, ".pin");
-    assert!(pin.contains("Position = UDim2.new(1, -15, 0, 2)"), "{out}");
-    assert!(pin.contains("AnchorPoint = Vector2.new(1, 0)"), "{out}");
+    assert!(pin.contains("[\"Position\"] = UDim2.new(1, -15, 0, 2)"), "{out}");
+    assert!(pin.contains("[\"AnchorPoint\"] = Vector2.new(1, 0)"), "{out}");
     let mid = rule_of(&out, ".mid");
-    assert!(mid.contains("Position = UDim2.new(0.5, 0, 0, 0)"), "{out}");
-    assert!(mid.contains("AnchorPoint = Vector2.new(0.5, 0)"), "{out}");
+    assert!(mid.contains("[\"Position\"] = UDim2.new(0.5, 0, 0, 0)"), "{out}");
+    assert!(mid.contains("[\"AnchorPoint\"] = Vector2.new(0.5, 0)"), "{out}");
     assert!(!stderr.contains("margin"), "positioned margins are exact:\n{stderr}");
 }
 
@@ -1301,10 +1312,10 @@ fn margins_in_flow_move_the_element_and_warn_about_siblings() {
         ".a { width: 200px; height: 40px; margin: 0 auto; } .b { margin-left: auto; width: 10px; height: 10px; }",
         &["--approx"],
     );
-    assert!(rule_of(&out, ".a").contains("AnchorPoint = Vector2.new(0.5, 0)"), "{out}");
+    assert!(rule_of(&out, ".a").contains("[\"AnchorPoint\"] = Vector2.new(0.5, 0)"), "{out}");
     let b = rule_of(&out, ".b");
-    assert!(b.contains("Position = UDim2.new(1, 0, 0, 0)"), "{out}");
-    assert!(b.contains("AnchorPoint = Vector2.new(1, 0)"), "{out}");
+    assert!(b.contains("[\"Position\"] = UDim2.new(1, 0, 0, 0)"), "{out}");
+    assert!(b.contains("[\"AnchorPoint\"] = Vector2.new(1, 0)"), "{out}");
     assert!(stderr.contains("siblings don't make room"), "{stderr}");
     assert!(!stderr.contains("no Roblox equivalent"), "{stderr}");
 }
@@ -1318,11 +1329,11 @@ fn line_height_pads_the_half_leading_like_css() {
     );
     // (1.5 - 1) x 20 / 2 = 5 above and below, on top of the padding.
     let label = rule_of(&out, ".label::UIPadding");
-    assert!(label.contains("PaddingTop = UDim.new(0, 9)"), "{out}");
-    assert!(label.contains("PaddingLeft = UDim.new(0, 4)"), "{out}");
+    assert!(label.contains("[\"PaddingTop\"] = UDim.new(0, 9)"), "{out}");
+    assert!(label.contains("[\"PaddingLeft\"] = UDim.new(0, 4)"), "{out}");
     // A rule that only changes the padding keeps the line height from the cascade.
-    assert!(rule_of(&out, ".label.big::UIPadding").contains("PaddingTop = UDim.new(0, 11)"), "{out}");
-    assert!(rule_of(&out, ".px::UIPadding").contains("PaddingBottom = UDim.new(0, 2)"), "{out}");
+    assert!(rule_of(&out, ".label.big::UIPadding").contains("[\"PaddingTop\"] = UDim.new(0, 11)"), "{out}");
+    assert!(rule_of(&out, ".px::UIPadding").contains("[\"PaddingBottom\"] = UDim.new(0, 2)"), "{out}");
     assert!(!out.contains("\".one::UIPadding\""), "{out}");
 }
 
@@ -1332,9 +1343,9 @@ fn align_content_aligns_a_blocks_text() {
         ".a { align-content: center; } .b { display: flex; flex-wrap: wrap; align-content: center; }",
         &["--approx"],
     );
-    assert!(rule_of(&out, ".a").contains("TextYAlignment = Enum.TextYAlignment.Center"), "{out}");
+    assert!(rule_of(&out, ".a").contains("[\"TextYAlignment\"] = Enum.TextYAlignment.Center"), "{out}");
     // `.a` and the user-agent default (text starts at the top, as in CSS); `.b` has none.
-    assert_eq!(out.matches("TextYAlignment =").count(), 2, "only `.a` aligns its text:\n{out}");
+    assert_eq!(out.matches("[\"TextYAlignment\"] =").count(), 2, "only `.a` aligns its text:\n{out}");
     assert!(stderr.contains("`align-content` on a flex or grid container"), "{stderr}");
 }
 
@@ -1463,15 +1474,21 @@ fn font_size_is_the_em_so_text_size_scales_by_the_familys_line_height() {
     );
     // 13px x Roboto Mono's 1.3188 is a 17px line; `line-height: 1` pulls it back to 13px.
     let mono = rule_of(&out, ".mono");
-    assert!(mono.contains("TextSize = 17"), "{out}");
+    assert!(mono.contains("[\"TextSize\"] = 17"), "{out}");
     let pad = rule_of(&out, ".mono::UIPadding");
-    assert!(pad.contains("PaddingTop = UDim.new(0, -2)") && pad.contains("PaddingBottom = UDim.new(0, -2)"), "{out}");
+    assert!(
+        pad.contains("[\"PaddingTop\"] = UDim.new(0, -2)") && pad.contains("[\"PaddingBottom\"] = UDim.new(0, -2)"),
+        "{out}"
+    );
     // Changing only the family re-sizes the text, and splits an odd leading into whole pixels.
-    assert!(rule_of(&out, ".mono.sans").contains("TextSize = 16"), "{out}");
+    assert!(rule_of(&out, ".mono.sans").contains("[\"TextSize\"] = 16"), "{out}");
     let pad = rule_of(&out, ".mono.sans::UIPadding");
-    assert!(pad.contains("PaddingTop = UDim.new(0, -2)") && pad.contains("PaddingBottom = UDim.new(0, -1)"), "{out}");
+    assert!(
+        pad.contains("[\"PaddingTop\"] = UDim.new(0, -2)") && pad.contains("[\"PaddingBottom\"] = UDim.new(0, -1)"),
+        "{out}"
+    );
     // With `line-height: normal` the family's own line is already what a browser draws.
-    assert!(rule_of(&out, ".big").contains("TextSize = 23"), "{out}");
+    assert!(rule_of(&out, ".big").contains("[\"TextSize\"] = 23"), "{out}");
     assert!(!out.contains("\".big::UIPadding\""), "{out}");
 }
 
@@ -1487,11 +1504,11 @@ fn tokens_are_compiled_in_where_roblox_cant_look_them_up() {
     assert!(!stderr.contains("ignored") && !stderr.contains("unsupported"), "{stderr}");
     let a = rule_of(&out, ".a");
     assert!(a.contains("rbxasset://fonts/families/SourceSansPro.json"), "{out}");
-    assert!(a.contains("TextSize = 16"), "the family is known, so the size scales:\n{out}");
+    assert!(a.contains("[\"TextSize\"] = 16"), "the family is known, so the size scales:\n{out}");
     // A color token stays a live reference, so a theme can still change it.
-    assert!(a.contains("TextColor3 = \"$accent\""), "{out}");
+    assert!(a.contains("[\"TextColor3\"] = \"$accent\""), "{out}");
     // So does a length a property uses whole.
-    assert!(rule_of(&out, ".a::UICorner").contains("CornerRadius = \"$radius\""), "{out}");
+    assert!(rule_of(&out, ".a::UICorner").contains("[\"CornerRadius\"] = \"$radius\""), "{out}");
     assert!(out.contains("\".a::UIGradient\""), "{out}");
     // The gradient token itself can only be an attribute as text, never as a Luau call.
     assert!(out.contains("SetAttribute(\"grad\", \"linear-gradient("), "{out}");
@@ -1506,11 +1523,11 @@ fn border_colors_from_tokens() {
         &["--approx"],
     );
     // An opaque token stays a live reference, in the shorthand as in `border-color`.
-    assert!(rule_of(&out, ".a::UIStroke").contains("Color = \"$line\""), "{out}");
+    assert!(rule_of(&out, ".a::UIStroke").contains("[\"Color\"] = \"$line\""), "{out}");
     // A translucent one is compiled in: a Color3 attribute would drop its alpha.
     let b = rule_of(&out, ".b::UIStroke");
-    assert!(b.contains("Color = Color3.fromRGB(255, 255, 255)"), "{out}");
-    assert!(b.contains("Transparency = 0.92"), "{out}");
+    assert!(b.contains("[\"Color\"] = Color3.fromRGB(255, 255, 255)"), "{out}");
+    assert!(b.contains("[\"Transparency\"] = 0.92"), "{out}");
 }
 
 #[test]
@@ -1539,10 +1556,10 @@ fn gradient_angles_follow_the_elements_shape() {
         &["--approx"],
     );
     // A real 135deg on a 200x10 bar runs almost along it: atan(10 / 200).
-    assert!(rule_of(&out, ".bar::UIGradient").contains("Rotation = 2.862405"), "{out}");
-    assert!(rule_of(&out, ".sq::UIGradient").contains("Rotation = 45"), "{out}");
+    assert!(rule_of(&out, ".bar::UIGradient").contains("[\"Rotation\"] = 2.862405"), "{out}");
+    assert!(rule_of(&out, ".sq::UIGradient").contains("[\"Rotation\"] = 45"), "{out}");
     // Corner to corner in both, whatever the shape.
-    assert!(rule_of(&out, ".corner::UIGradient").contains("Rotation = 45"), "{out}");
+    assert!(rule_of(&out, ".corner::UIGradient").contains("[\"Rotation\"] = 45"), "{out}");
     assert!(stderr.contains("a `135deg` gradient's direction depends on the element's shape"), "{stderr}");
     // `.near` is close enough to a right angle that the shape barely moves it.
     assert_eq!(stderr.matches("depends on the element's shape").count(), 1, "only `.flex`:\n{stderr}");
@@ -1555,11 +1572,11 @@ fn a_border_takes_room_inside_the_box_like_css() {
          .card.flat { border: none; } .plain { border: 2px solid #fff; }",
         &["--approx"],
     );
-    assert!(rule_of(&out, ".card::UIPadding").contains("PaddingTop = UDim.new(0, 9)"), "{out}");
+    assert!(rule_of(&out, ".card::UIPadding").contains("[\"PaddingTop\"] = UDim.new(0, 9)"), "{out}");
     // A rule that only changes the border keeps the padding it inherits.
-    assert!(rule_of(&out, ".card.hot::UIPadding").contains("PaddingLeft = UDim.new(0, 11)"), "{out}");
-    assert!(rule_of(&out, ".card.flat::UIPadding").contains("PaddingLeft = UDim.new(0, 8)"), "{out}");
-    assert!(rule_of(&out, ".plain::UIPadding").contains("PaddingRight = UDim.new(0, 2)"), "{out}");
+    assert!(rule_of(&out, ".card.hot::UIPadding").contains("[\"PaddingLeft\"] = UDim.new(0, 11)"), "{out}");
+    assert!(rule_of(&out, ".card.flat::UIPadding").contains("[\"PaddingLeft\"] = UDim.new(0, 8)"), "{out}");
+    assert!(rule_of(&out, ".plain::UIPadding").contains("[\"PaddingRight\"] = UDim.new(0, 2)"), "{out}");
 }
 
 #[test]
@@ -1568,7 +1585,7 @@ fn a_gradient_angle_uses_a_size_from_a_weaker_rule() {
         ".card { width: 200px; height: 10px; } .card.hot { background: linear-gradient(135deg, #000, #fff); }",
         &["--approx"],
     );
-    assert!(rule_of(&out, ".card.hot::UIGradient").contains("Rotation = 2.862405"), "{out}");
+    assert!(rule_of(&out, ".card.hot::UIGradient").contains("[\"Rotation\"] = 2.862405"), "{out}");
     assert!(!stderr.contains("depends on the element's shape"), "{stderr}");
     // The size stays the weaker rule's: the gradient rule doesn't restate it.
     assert!(!rule_of(&out, ".card.hot").contains("Size ="), "{out}");
@@ -1594,11 +1611,11 @@ fn css_defaults_for_backgrounds_borders_and_text_alignment() {
         &out,
         "Frame, TextLabel, TextButton, TextBox, ImageLabel, ImageButton, ScrollingFrame, CanvasGroup, VideoFrame, ViewportFrame",
     );
-    assert!(gui.contains("BackgroundTransparency = 1") && gui.contains("BorderSizePixel = 0"), "{out}");
-    assert!(rule_of(&out, "TextButton, ImageButton").contains("AutoButtonColor = false"), "{out}");
+    assert!(gui.contains("[\"BackgroundTransparency\"] = 1") && gui.contains("[\"BorderSizePixel\"] = 0"), "{out}");
+    assert!(rule_of(&out, "TextButton, ImageButton").contains("[\"AutoButtonColor\"] = false"), "{out}");
     let text = rule_of(&out, "TextLabel, TextBox");
-    assert!(text.contains("TextXAlignment = Enum.TextXAlignment.Left"), "{out}");
-    assert!(text.contains("TextYAlignment = Enum.TextYAlignment.Top"), "{out}");
+    assert!(text.contains("[\"TextXAlignment\"] = Enum.TextXAlignment.Left"), "{out}");
+    assert!(text.contains("[\"TextYAlignment\"] = Enum.TextYAlignment.Top"), "{out}");
 }
 
 #[test]
@@ -1627,7 +1644,7 @@ fn no_user_agent_styles_leaves_out_the_default_rules() {
     }
     // Rules generated from the stylesheet's own flex containers stay.
     assert!(out.contains("UIFlexItem"), "{out}");
-    assert!(rule_of(&out, "TextLabel").contains("TextSize = 14"), "{out}");
+    assert!(rule_of(&out, "TextLabel").contains("[\"TextSize\"] = 14"), "{out}");
 }
 
 #[test]
@@ -1636,9 +1653,9 @@ fn a_growing_item_without_a_width_starts_from_zero() {
         compile(".card { flex-grow: 1; } .fixed { flex-grow: 1; width: 120px; height: 20px; }", &["--approx"]);
     // Sized by its content, a percentage-wide child would inflate it to the whole line.
     let card = rule_of(&out, ".card");
-    assert!(card.contains("Size = UDim2.new(0, 0, 0, 0)"), "{out}");
-    assert!(card.contains("AutomaticSize = Enum.AutomaticSize.Y,"), "{out}");
-    assert!(rule_of(&out, ".fixed").contains("Size = UDim2.new(0, 120, 0, 20)"), "{out}");
+    assert!(card.contains("[\"Size\"] = UDim2.new(0, 0, 0, 0)"), "{out}");
+    assert!(card.contains("[\"AutomaticSize\"] = Enum.AutomaticSize.Y,"), "{out}");
+    assert!(rule_of(&out, ".fixed").contains("[\"Size\"] = UDim2.new(0, 120, 0, 20)"), "{out}");
     assert!(!stderr.contains("only `width`"), "{stderr}");
 }
 
@@ -1671,7 +1688,20 @@ fn allow_raw_luau_lets_luau_through() {
     assert_eq!(code, 1, "luau() without --allow-raw-luau is an error:\n{out}");
     assert!(stderr.contains("error:") && stderr.contains("--allow-raw-luau"), "{stderr}");
     let (out, _) = compile(scss, &["--allow-raw-luau"]);
-    assert!(out.contains("Text = game.Players.LocalPlayer.Name,"), "{out}");
+    assert!(out.contains(r#"["Text"] = game.Players.LocalPlayer.Name,"#), "{out}");
+}
+
+#[test]
+fn raw_luau_never_goes_into_json_or_a_model_file() {
+    let dir = TempDir::new("raw-luau-data");
+    let input = dir.write("in.scss", ".a { Text: luau(\"require(1)\"); }");
+    let (code, out, stderr) = run(&[input.to_str().unwrap(), "--emit", "json", "--allow-raw-luau", "-o", "-"], None);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("JSON holds the stylesheet as data, so it can't hold raw Luau"), "{stderr}");
+    assert!(!out.contains("require"), "{out}");
+    let (code, _, stderr) = run(&[input.to_str().unwrap(), "--emit", "rbxmx", "--allow-raw-luau", "-o", "-"], None);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("a model file can't hold raw Luau"), "{stderr}");
 }
 
 #[test]
@@ -1681,11 +1711,11 @@ fn roblox_constructors_become_typed_values() {
          FontFace: Font.fromName(\"Gotham\"); Font: Enum.Font.Arial; }",
         &[],
     );
-    assert!(out.contains("Size = UDim2.new(1, 0, 0.5, 0),"), "{out}\n{stderr}");
-    assert!(out.contains("Position = UDim2.new(0, 4, 0, 8),"), "{out}");
-    assert!(out.contains("BackgroundColor3 = Color3.fromRGB(255, 0, 0),"), "{out}");
-    assert!(out.contains(r#"FontFace = Font.new("rbxasset://fonts/families/Gotham.json"),"#), "{out}");
-    assert!(out.contains("Font = Enum.Font.Arial,"), "{out}");
+    assert!(out.contains("[\"Size\"] = UDim2.new(1, 0, 0.5, 0),"), "{out}\n{stderr}");
+    assert!(out.contains("[\"Position\"] = UDim2.new(0, 4, 0, 8),"), "{out}");
+    assert!(out.contains("[\"BackgroundColor3\"] = Color3.fromRGB(255, 0, 0),"), "{out}");
+    assert!(out.contains(r#"["FontFace"] = Font.new("rbxasset://fonts/families/Gotham.json"),"#), "{out}");
+    assert!(out.contains("[\"Font\"] = Enum.Font.Arial,"), "{out}");
 }
 
 #[test]
@@ -1726,8 +1756,8 @@ fn text_inside_an_element_inherits_its_text_properties() {
     );
     let inherited = ".card >> TextLabel, .card >> TextButton, .card >> TextBox";
     let rule = rule_of(&out, inherited);
-    assert!(rule.contains("TextColor3 = Color3.fromRGB(255, 0, 0)"), "{out}");
-    assert!(rule.contains("TextXAlignment = Enum.TextXAlignment.Center"), "{out}");
+    assert!(rule.contains("[\"TextColor3\"] = Color3.fromRGB(255, 0, 0)"), "{out}");
+    assert!(rule.contains("[\"TextXAlignment\"] = Enum.TextXAlignment.Center"), "{out}");
     assert!(priority_of(&out, inherited) > 0.0, "inherited values beat the user-agent defaults:\n{out}");
     assert!(priority_of(&out, inherited) < priority_of(&out, "TextLabel"), "a rule for the text itself wins:\n{out}");
     assert!(priority_of(&out, inherited) < priority_of(&out, ".card >> .title"), "{out}");
@@ -1736,17 +1766,17 @@ fn text_inside_an_element_inherits_its_text_properties() {
 #[test]
 fn a_rule_that_redefines_a_token_recompiles_the_declarations_using_it() {
     let (out, _) = compile(".a { --gap: 6px; padding: var(--gap); } .a.b { --gap: 10px; }", &["--approx"]);
-    assert!(rule_of(&out, ".a::UIPadding").contains("PaddingTop = UDim.new(0, 6)"), "{out}");
-    assert!(rule_of(&out, ".a.b::UIPadding").contains("PaddingTop = UDim.new(0, 10)"), "{out}");
+    assert!(rule_of(&out, ".a::UIPadding").contains("[\"PaddingTop\"] = UDim.new(0, 6)"), "{out}");
+    assert!(rule_of(&out, ".a.b::UIPadding").contains("[\"PaddingTop\"] = UDim.new(0, 10)"), "{out}");
 }
 
 #[test]
 fn min_max_and_clamp_sizes_become_size_constraints() {
     let (out, stderr) = compile(".a { width: min(100%, 300px); height: clamp(10px, 50%, 200px); }", &["--approx"]);
-    assert!(rule_of(&out, ".a").contains("Size = UDim2.new(1, 0, 0.5, 0)"), "{out}");
+    assert!(rule_of(&out, ".a").contains("[\"Size\"] = UDim2.new(1, 0, 0.5, 0)"), "{out}");
     let constraint = rule_of(&out, ".a::UISizeConstraint");
-    assert!(constraint.contains("MinSize = Vector2.new(0, 10)"), "{out}");
-    assert!(constraint.contains("MaxSize = Vector2.new(300, 200)"), "{out}");
+    assert!(constraint.contains("[\"MinSize\"] = Vector2.new(0, 10)"), "{out}");
+    assert!(constraint.contains("[\"MaxSize\"] = Vector2.new(300, 200)"), "{out}");
     assert!(!stderr.contains("width") && !stderr.contains("height"), "{stderr}");
 }
 
@@ -1754,18 +1784,18 @@ fn min_max_and_clamp_sizes_become_size_constraints() {
 fn a_clamped_font_size_scales_the_text_between_its_bounds() {
     let (out, _) =
         compile(".a { font-size: clamp(12px, 2vw, 20px); } .b { font-size: clamp(12px, 30px, 20px); }", &["--approx"]);
-    assert!(rule_of(&out, ".a").contains("TextScaled = true"), "{out}");
+    assert!(rule_of(&out, ".a").contains("[\"TextScaled\"] = true"), "{out}");
     let constraint = rule_of(&out, ".a::UITextSizeConstraint");
-    assert!(constraint.contains("MinTextSize = 12") && constraint.contains("MaxTextSize = 20"), "{out}");
-    assert!(rule_of(&out, ".b").contains("TextSize = 20"), "a px value is clamped directly:\n{out}");
+    assert!(constraint.contains("[\"MinTextSize\"] = 12") && constraint.contains("[\"MaxTextSize\"] = 20"), "{out}");
+    assert!(rule_of(&out, ".b").contains("[\"TextSize\"] = 20"), "a px value is clamped directly:\n{out}");
 }
 
 #[test]
 fn standalone_transform_properties_act_like_transform() {
     let (out, _) = compile(".a { translate: 4px 2px; rotate: 45deg; scale: 2; }", &["--approx"]);
     let a = rule_of(&out, ".a");
-    assert!(a.contains("Position = UDim2.new(0, 4, 0, 2)") && a.contains("Rotation = 45"), "{out}");
-    assert!(rule_of(&out, ".a::UIScale").contains("Scale = 2"), "{out}");
+    assert!(a.contains("[\"Position\"] = UDim2.new(0, 4, 0, 2)") && a.contains("[\"Rotation\"] = 45"), "{out}");
+    assert!(rule_of(&out, ".a::UIScale").contains("[\"Scale\"] = 2"), "{out}");
 }
 
 #[test]
@@ -1775,25 +1805,28 @@ fn image_fitting_and_resampling() {
          .b { background-image: url(\"rbxassetid://1\"); background-size: 32px 32px; } .c { background-size: contain; }",
         &["--approx"],
     );
-    assert!(rule_of(&out, ".a").contains("ScaleType = Enum.ScaleType.Crop"), "{out}");
-    assert!(rule_of(&out, ".a").contains("ResampleMode = Enum.ResamplerMode.Pixelated"), "{out}");
+    assert!(rule_of(&out, ".a").contains("[\"ScaleType\"] = Enum.ScaleType.Crop"), "{out}");
+    assert!(rule_of(&out, ".a").contains("[\"ResampleMode\"] = Enum.ResamplerMode.Pixelated"), "{out}");
     let b = rule_of(&out, ".b");
-    assert!(b.contains("ScaleType = Enum.ScaleType.Tile") && b.contains("TileSize = UDim2.new(0, 32, 0, 32)"), "{out}");
-    assert!(rule_of(&out, ".c").contains("ScaleType = Enum.ScaleType.Fit"), "{out}");
+    assert!(
+        b.contains("[\"ScaleType\"] = Enum.ScaleType.Tile") && b.contains("[\"TileSize\"] = UDim2.new(0, 32, 0, 32)"),
+        "{out}"
+    );
+    assert!(rule_of(&out, ".c").contains("[\"ScaleType\"] = Enum.ScaleType.Fit"), "{out}");
 }
 
 #[test]
 fn placeholder_color_styles_the_textbox() {
     let (out, stderr) = compile(".search::placeholder { color: #888; } ::placeholder { color: red; }", &["--approx"]);
-    assert!(rule_of(&out, ".search").contains("PlaceholderColor3 = Color3.fromRGB(136, 136, 136)"), "{out}");
-    assert!(rule_of(&out, "TextBox").contains("PlaceholderColor3 = Color3.fromRGB(255, 0, 0)"), "{out}");
+    assert!(rule_of(&out, ".search").contains("[\"PlaceholderColor3\"] = Color3.fromRGB(136, 136, 136)"), "{out}");
+    assert!(rule_of(&out, "TextBox").contains("[\"PlaceholderColor3\"] = Color3.fromRGB(255, 0, 0)"), "{out}");
     assert!(!stderr.contains("placeholder"), "{stderr}");
 }
 
 #[test]
 fn current_color_is_the_rules_color() {
     let (out, _) = compile(".a { color: red; border: 1px solid currentColor; }", &["--approx"]);
-    assert!(rule_of(&out, ".a::UIStroke").contains("Color = Color3.fromRGB(255, 0, 0)"), "{out}");
+    assert!(rule_of(&out, ".a::UIStroke").contains("[\"Color\"] = Color3.fromRGB(255, 0, 0)"), "{out}");
 }
 
 #[test]
@@ -1803,7 +1836,7 @@ fn font_face_names_a_font_asset() {
          .a { font-family: Brand, sans-serif; }",
         &["--approx"],
     );
-    assert!(rule_of(&out, ".a").contains("FontFace = Font.new(\"rbxassetid://123\""), "{out}");
+    assert!(rule_of(&out, ".a").contains("[\"FontFace\"] = Font.new(\"rbxassetid://123\""), "{out}");
     assert!(!stderr.contains("font-face") && !stderr.contains("Brand"), "{stderr}");
 }
 
@@ -1835,7 +1868,10 @@ fn tags_drop_properties_the_tagged_classes_dont_have() {
     assert!(!stderr.contains("`color`"), "an inherited property styles the text inside:\n{stderr}");
     assert!(!out.contains("rule(sheet, \".card\""), "nothing is left for .card itself:\n{out}");
     let avatar = rule_of(&out, ".avatar");
-    assert!(avatar.contains("ScaleType = Enum.ScaleType.Crop") && avatar.contains("ImageTransparency = 0.5"), "{out}");
+    assert!(
+        avatar.contains("[\"ScaleType\"] = Enum.ScaleType.Crop") && avatar.contains("[\"ImageTransparency\"] = 0.5"),
+        "{out}"
+    );
     assert!(!avatar.contains("TextColor3") && !avatar.contains("GroupTransparency"), "{out}");
     assert!(rule_of(&out, ".card >> TextLabel, .card >> TextButton, .card >> TextBox").contains("TextColor3"), "{out}");
 }
@@ -1879,7 +1915,7 @@ fn data_theme_and_color_scheme_rules_become_theme_sheets() {
     assert!(dark.contains("t:SetAttribute(\"gap\", 4)"), "a theme starts from the defaults:\n{out}");
     let light = &out[out.find("t.Name = \"light\"").unwrap()..];
     assert!(light[..light.find("end").unwrap()].contains("t:SetAttribute(\"gap\", 12)"), "{out}");
-    assert!(rule_of(&out, ".a").contains("BackgroundColor3 = \"$bg\""), "{out}");
+    assert!(rule_of(&out, ".a").contains("[\"BackgroundColor3\"] = \"$bg\""), "{out}");
 }
 
 #[test]
@@ -1904,12 +1940,12 @@ fn length_tokens_stay_live_where_a_udim_property_uses_them_whole() {
     assert!(out.contains("sheet:SetAttribute(\"radius\", UDim.new(0, 8))"), "{out}");
     assert!(out.contains("sheet:SetAttribute(\"half\", UDim.new(0.5, 0))"), "{out}");
     assert!(out.contains("sheet:SetAttribute(\"w\", 30)"), "a compiled-in token stays a number:\n{out}");
-    assert!(rule_of(&out, ".a::UICorner").contains("CornerRadius = \"$radius\""), "{out}");
-    assert!(rule_of(&out, ".a::UIPadding").contains("PaddingTop = \"$pad\""), "{out}");
-    assert!(rule_of(&out, ".a").contains("Size = UDim2.new(0, 30, 0, 4)"), "{out}");
-    assert!(rule_of(&out, ".b::UICorner").contains("CornerRadius = \"$half\""), "{out}");
+    assert!(rule_of(&out, ".a::UICorner").contains("[\"CornerRadius\"] = \"$radius\""), "{out}");
+    assert!(rule_of(&out, ".a::UIPadding").contains("[\"PaddingTop\"] = \"$pad\""), "{out}");
+    assert!(rule_of(&out, ".a").contains("[\"Size\"] = UDim2.new(0, 30, 0, 4)"), "{out}");
+    assert!(rule_of(&out, ".b::UICorner").contains("[\"CornerRadius\"] = \"$half\""), "{out}");
     // The border adds to the padding, which can't be the token then.
-    assert!(rule_of(&out, ".c::UIPadding").contains("PaddingTop = UDim.new(0, 8)"), "{out}");
+    assert!(rule_of(&out, ".c::UIPadding").contains("[\"PaddingTop\"] = UDim.new(0, 8)"), "{out}");
 }
 
 #[test]
@@ -1922,11 +1958,14 @@ fn a_redefined_token_is_resolved_in_the_redefining_rule() {
     // declarations, and its pseudo-instance rule gets the attribute too.
     let b = &out[out.find("rule(sheet, \".a.b\"").unwrap()..];
     let b = &b[..b.find("\nend").unwrap()];
-    assert!(b.contains("TextColor3 = \"$c\"") && b.contains("SetAttribute(\"c\", Color3.fromRGB(255, 0, 0))"), "{out}");
+    assert!(
+        b.contains("[\"TextColor3\"] = \"$c\"") && b.contains("SetAttribute(\"c\", Color3.fromRGB(255, 0, 0))"),
+        "{out}"
+    );
     let corner = &out[out.find("rule(sheet, \".a.b::UICorner\"").unwrap()..];
     let corner = &corner[..corner.find("\nend").unwrap()];
     assert!(
-        corner.contains("CornerRadius = \"$r\"") && corner.contains("SetAttribute(\"r\", UDim.new(0, 9))"),
+        corner.contains("[\"CornerRadius\"] = \"$r\"") && corner.contains("SetAttribute(\"r\", UDim.new(0, 9))"),
         "{out}"
     );
 }
@@ -1962,15 +2001,6 @@ fn emit_rbxmx_writes_a_model_without_code() {
 }
 
 #[test]
-fn raw_luau_cant_go_in_a_model_file() {
-    let dir = TempDir::new("rbxmx-raw");
-    let input = dir.write("in.scss", ".a { Text: luau(\"require(1)\"); }");
-    let (code, _, stderr) = run(&[input.to_str().unwrap(), "--emit", "rbxmx", "--allow-raw-luau", "-o", "-"], None);
-    assert_eq!(code, 1, "{stderr}");
-    assert!(stderr.contains("a model file can't hold raw Luau"), "{stderr}");
-}
-
-#[test]
 fn overflow_wrap_break_word_is_what_roblox_does() {
     let (_, stderr) = compile(
         ".a { overflow-wrap: break-word; } .b { word-wrap: anywhere; } .c { overflow-wrap: normal; }",
@@ -1992,19 +2022,21 @@ fn border_image_is_a_nine_slice_of_a_picture_whose_size_its_url_gives() {
     );
     assert!(stderr.is_empty(), "{stderr}");
     let p = rule_of(&out, ".p");
-    assert!(p.contains("Image = \"rbxassetid://1\","), "the size isn't part of the id:\n{out}");
+    assert!(p.contains("[\"Image\"] = \"rbxassetid://1\","), "the size isn't part of the id:\n{out}");
     assert!(
-        p.contains("ScaleType = Enum.ScaleType.Slice") && p.contains("SliceCenter = Rect.new(18, 18, 174, 26)"),
+        p.contains("[\"ScaleType\"] = Enum.ScaleType.Slice")
+            && p.contains("[\"SliceCenter\"] = Rect.new(18, 18, 174, 26)"),
         "{out}"
     );
     // A rule that only swaps the picture keeps the slicing.
     let hover = rule_of(&out, ".p:Hover");
     assert!(
-        hover.contains("Image = \"rbxassetid://2\"") && hover.contains("SliceCenter = Rect.new(18, 18, 174, 26)"),
+        hover.contains("[\"Image\"] = \"rbxassetid://2\"")
+            && hover.contains("[\"SliceCenter\"] = Rect.new(18, 18, 174, 26)"),
         "{out}"
     );
     let bar = rule_of(&out, ".bar");
-    assert!(bar.contains("SliceCenter = Rect.new(8, 6, 56, 6)") && bar.contains("SliceScale = 2"), "{out}");
+    assert!(bar.contains("[\"SliceCenter\"] = Rect.new(8, 6, 56, 6)") && bar.contains("[\"SliceScale\"] = 2"), "{out}");
 }
 
 #[test]
@@ -2020,7 +2052,7 @@ fn border_image_says_what_roblox_needs() {
 #[test]
 fn contain_size_stops_an_element_sizing_itself_by_its_content() {
     let (out, _) = compile(".fill { contain: size; background-color: red; }", &["--approx"]);
-    assert!(rule_of(&out, ".fill").contains("AutomaticSize = Enum.AutomaticSize.None"), "{out}");
+    assert!(rule_of(&out, ".fill").contains("[\"AutomaticSize\"] = Enum.AutomaticSize.None"), "{out}");
 }
 
 #[test]
@@ -2031,9 +2063,12 @@ fn multiply_tints_the_picture() {
         &["--approx"],
     );
     let f = rule_of(&out, ".f");
-    assert!(f.contains("ImageColor3 = Color3.fromRGB(176, 160, 146)") && !f.contains("BackgroundColor3"), "{out}");
-    assert!(f.contains("BackgroundTransparency = 1"), "{out}");
-    assert!(rule_of(&out, ".f.full").contains("ImageColor3 = Color3.fromRGB(255, 255, 255)"), "{out}");
+    assert!(
+        f.contains("[\"ImageColor3\"] = Color3.fromRGB(176, 160, 146)") && !f.contains("BackgroundColor3"),
+        "{out}"
+    );
+    assert!(f.contains("[\"BackgroundTransparency\"] = 1"), "{out}");
+    assert!(rule_of(&out, ".f.full").contains("[\"ImageColor3\"] = Color3.fromRGB(255, 255, 255)"), "{out}");
 }
 
 #[test]
@@ -2042,8 +2077,8 @@ fn background_image_none_clears_the_picture() {
         ".x { background-image: url(\"rbxassetid://8#4x4\"); } .x.worn { background-image: none; }",
         &["--approx"],
     );
-    assert!(rule_of(&out, ".x").contains("Image = \"rbxassetid://8\""), "{out}");
-    assert!(rule_of(&out, ".x.worn").contains("Image = \"\""), "{out}");
+    assert!(rule_of(&out, ".x").contains("[\"Image\"] = \"rbxassetid://8\""), "{out}");
+    assert!(rule_of(&out, ".x.worn").contains("[\"Image\"] = \"\""), "{out}");
 }
 
 #[test]
@@ -2054,12 +2089,14 @@ fn text_shadow_is_the_text_stroke() {
     );
     let a = rule_of(&out, ".a");
     assert!(
-        a.contains("TextStrokeColor3 = Color3.fromRGB(0, 0, 0)") && a.contains("TextStrokeTransparency = 0.6"),
+        a.contains("[\"TextStrokeColor3\"] = Color3.fromRGB(0, 0, 0)")
+            && a.contains("[\"TextStrokeTransparency\"] = 0.6"),
         "{out}"
     );
     let b = rule_of(&out, ".b");
     assert!(
-        b.contains("TextStrokeColor3 = Color3.fromRGB(120, 30, 10)") && b.contains("TextStrokeTransparency = 0"),
+        b.contains("[\"TextStrokeColor3\"] = Color3.fromRGB(120, 30, 10)")
+            && b.contains("[\"TextStrokeTransparency\"] = 0"),
         "{out}"
     );
     assert!(stderr.contains("no offset or blur"), "{stderr}");
@@ -2073,9 +2110,9 @@ fn url_of_an_expression_is_a_function_call() {
         &["--approx"],
     );
     assert!(stderr.is_empty(), "{stderr}");
-    assert!(rule_of(&out, ".a").contains("Image = \"rbxassetid://2\""), "{out}");
-    assert!(rule_of(&out, ".b").contains("Image = \"rbxassetid://3\""), "{out}");
-    assert!(rule_of(&out, ".c").contains("Image = \"rbxassetid://4\""), "{out}");
+    assert!(rule_of(&out, ".a").contains("[\"Image\"] = \"rbxassetid://2\""), "{out}");
+    assert!(rule_of(&out, ".b").contains("[\"Image\"] = \"rbxassetid://3\""), "{out}");
+    assert!(rule_of(&out, ".c").contains("[\"Image\"] = \"rbxassetid://4\""), "{out}");
 }
 
 #[test]
@@ -2085,6 +2122,6 @@ fn text_sizes_and_weights_in_the_family_the_root_gives_it() {
         &["--approx"],
     );
     // Merriweather's line is taller than its em, so 20px is a larger TextSize than 20.
-    assert!(!rule_of(&out, ".a").contains("TextSize = 20,"), "{out}");
+    assert!(!rule_of(&out, ".a").contains("[\"TextSize\"] = 20,"), "{out}");
     assert!(rule_of(&out, ".b").contains("Merriweather.json\", Enum.FontWeight.Bold"), "{out}");
 }

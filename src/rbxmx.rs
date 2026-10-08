@@ -7,10 +7,7 @@
 
 use std::fmt::Write as _;
 
-use crate::luau::{Rule, Sheet, TweenInfo, Value};
-
-/// The Enum items GUI objects use and the numbers they're saved as (see the file's header).
-const ENUMS: &str = include_str!("enums.txt");
+use crate::luau::{EnumItem, Rule, Sheet, TweenInfo, Value};
 
 /// Writes the model. The second value lists what a model file can't hold, which was left out.
 pub fn write(sheet: &Sheet) -> Result<(String, Vec<String>), String> {
@@ -246,10 +243,10 @@ fn attribute(b: &mut Bytes, v: &Value) -> Result<(), String> {
             b.f32(*x);
             b.f32(*y);
         }
-        Value::Enum { enum_type, item } => {
+        Value::Enum(e) => {
             b.u8(0x15);
-            b.str(enum_type);
-            b.u32(enum_value(enum_type, item)?);
+            b.str(e.enum_type());
+            b.u32(e.value());
         }
         Value::NumberSequence(keypoints) => {
             b.u8(0x17);
@@ -282,8 +279,8 @@ fn attribute(b: &mut Bytes, v: &Value) -> Result<(), String> {
         }
         Value::Font { family, weight, style } => {
             b.u8(0x21);
-            b.u16(enum_value("FontWeight", weight.as_deref().unwrap_or("Regular"))? as u16);
-            b.u8(enum_value("FontStyle", style.as_deref().unwrap_or("Normal"))? as u8);
+            b.u16(weight.unwrap_or(EnumItem::of("FontWeight", "Regular")).value() as u16);
+            b.u8(style.unwrap_or(EnumItem::of("FontStyle", "Normal")).value() as u8);
             b.str(family);
             // The cached face, which Roblox fills in when it loads the font.
             b.str("");
@@ -292,22 +289,6 @@ fn attribute(b: &mut Bytes, v: &Value) -> Result<(), String> {
         Value::Luau(_) => return Err("a model file can't hold raw Luau".into()),
     }
     Ok(())
-}
-
-/// The number Roblox saves an Enum item as.
-fn enum_value(enum_type: &str, item: &str) -> Result<u32, String> {
-    ENUMS
-        .lines()
-        .filter(|l| !l.starts_with('#'))
-        .find_map(|line| {
-            let mut words = line.split(' ');
-            (words.next() == Some(enum_type)).then(|| {
-                words
-                    .find_map(|w| w.split_once('=').filter(|(name, _)| *name == item).and_then(|(_, v)| v.parse().ok()))
-            })
-        })
-        .flatten()
-        .ok_or_else(|| format!("Enum.{enum_type}.{item} isn't an Enum item outlass can write to a model file"))
 }
 
 /// `PropertyTransitionsSerialize`: a version, a count, then each property's name and TweenInfo.
@@ -321,8 +302,8 @@ fn property_transitions(transitions: &[&(String, TweenInfo)]) -> Result<Vec<u8>,
         b.f32(t.time);
         b.f32(t.delay_time);
         b.i32(t.repeat_count);
-        b.u32(enum_value("EasingStyle", &t.easing_style)?);
-        b.u32(enum_value("EasingDirection", &t.easing_direction)?);
+        b.u32(t.easing_style.value());
+        b.u32(t.easing_direction.value());
         b.u8(u8::from(t.reverses));
     }
     Ok(b.0)
@@ -358,8 +339,8 @@ mod tests {
             "Z".to_string(),
             TweenInfo {
                 time: 0.25,
-                easing_style: "Back".into(),
-                easing_direction: "InOut".into(),
+                easing_style: EnumItem::of("EasingStyle", "Back"),
+                easing_direction: EnumItem::of("EasingDirection", "InOut"),
                 repeat_count: 2.0,
                 reverses: true,
                 delay_time: 0.5,
